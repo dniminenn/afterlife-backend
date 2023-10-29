@@ -26,8 +26,9 @@ pub async fn run_server(client: Client) {
     let client = Arc::new(client);
 
     let cors = warp::cors()
-        .allow_methods(vec!["POST", "GET"])
-        .allow_headers(vec!["Authorization", "Content-Type"]);
+        .allow_any_origin()
+        .allow_methods(vec!["GET", "POST", "OPTIONS"])
+        .allow_headers(vec!["Content-Type"]);
 
     let routes = warp::path!(String / String / "collection" / String)
         .and(warp::get())
