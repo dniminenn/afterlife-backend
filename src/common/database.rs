@@ -8,6 +8,11 @@ pub async fn connect() -> Result<Client, Box<dyn std::error::Error>> {
     config.port(env::var("AFTERLIFE_DATABASE_PORT")?.parse::<u16>()?);
     config.dbname(&*env::var("AFTERLIFE_DATABASE_DBNAME")?);
 
+    // Check if AFTERLIFE_DATABASE_PASSWORD is set and if so, use it
+    if let Ok(password) = env::var("AFTERLIFE_DATABASE_PASSWORD") {
+        config.password(&password);
+    }
+
     let (client, connection) = config.connect(NoTls).await?;
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -17,4 +22,3 @@ pub async fn connect() -> Result<Client, Box<dyn std::error::Error>> {
 
     Ok(client)
 }
-
