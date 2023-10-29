@@ -209,7 +209,7 @@ async fn handle_get_token_owners(
 ) -> Result<impl warp::Reply, Rejection> {
     match queries::get_token_owners(&*client, &chain_name, &contract_address, token_id).await {
         Ok(owners) => Ok(warp::reply::with_status(
-            warp::reply::json(&json!({ "owners": owners })),
+            warp::reply::json(&json!( owners )),
             warp::http::StatusCode::OK,
         )),
         Err(_) => Err(warp::reject::custom(CustomReject("Failed to fetch token owners".to_string()))),
