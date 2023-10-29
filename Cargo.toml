@@ -1,0 +1,22 @@
+[package]
+name = "afterlife-backend"
+version = "0.1.0"
+edition = "2021"
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+dotenv = "0.15"
+primitive-types = "0.10"
+bigdecimal = "0.3"
+serde_json = "1.0.107"
+tokio-postgres = "0.7"
+warp = "0.3"
+lazy_static = "1.4.0"
+once_cell = "1.18.0"
+lru = "0.12.0"
+serde = { version = "1.0", features = ["derive"] }
