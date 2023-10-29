@@ -25,6 +25,10 @@ struct ErrorResponse {
 pub async fn run_server(client: Client) {
     let client = Arc::new(client);
 
+    let cors = warp::cors()
+        .allow_methods(vec!["POST", "GET"])
+        .allow_headers(vec!["Authorization", "Content-Type"]);
+
     let routes = warp::path!(String / String / "collection" / String)
         .and(warp::get())
         .and(with_db(client.clone()))
@@ -46,7 +50,9 @@ pub async fn run_server(client: Client) {
                 .and(warp::post())
                 .and(warp::body::json())
                 .and_then(handle_get_username_by_wallet),
-        );
+        )
+        .map(|reply| warp::reply::with_header(reply, "Access-Control-Allow-Origin", "*"))
+        .with(cors);
 
     warp::serve(routes.recover(handle_custom_rejection))
         .run(([127, 0, 0, 1], 3030))
