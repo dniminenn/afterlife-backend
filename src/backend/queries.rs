@@ -188,6 +188,8 @@ pub async fn get_token_owners(
             }
         }
     }
+    // Remove 0x000000000000000000000000000000000000dEaD from results
+    owners.remove("0x000000000000000000000000000000000000dEaD");
 
     // Filter out the addresses with zero balances and collect the owners
     let owner_addresses: Vec<String> = owners
