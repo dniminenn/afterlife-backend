@@ -14,9 +14,9 @@ use dotenv::dotenv;
 async fn main() {
     dotenv().ok();
     // Print env vars
-    for (key, value) in std::env::vars() {
-        println!("{}: {}", key, value);
-    }
+    //for (key, value) in std::env::vars() {
+    //    println!("{}: {}", key, value);
+    //}
     let db_client = database::connect().await.expect("Failed to connect to database");
     api::run_server(db_client).await;
 }
