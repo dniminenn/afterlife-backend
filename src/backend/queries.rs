@@ -4,6 +4,9 @@ use std::option::Option;
 use tokio_postgres::Row;
 use warp::Filter;
 
+const DEAD_ADDRESS: &str = "0x000000000000000000000000000000000000dEaD";
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+
 #[derive(Debug)]
 pub struct Event {
     pub from_address: Option<String>,
@@ -105,34 +108,57 @@ pub async fn get_entire_collection(
     chain_name: &str,
     contract_address: &str,
 ) -> Result<Vec<u64>, Box<dyn std::error::Error + Send>> {
-    // Query to get all unique token ids for the specified chain and contract address
     let rows = client
         .query(
             r#"
-            SELECT DISTINCT jsonb_array_elements_text(e.ids::jsonb) as token_id_string
+            SELECT e.from_address, e.to_address, e.ids, e.values
             FROM events e
             JOIN contracts c ON e.contract_id = c.id
             JOIN chains ch ON c.chain_id = ch.id
-            WHERE c.address = $1 AND ch.name = $2
+            WHERE c.address = $1 AND ch.name = $2 AND (
+                e.from_address = $3 OR
+                e.to_address = $3 OR
+                e.to_address = $4
+            )
             "#,
-            &[&contract_address, &chain_name],
+            &[&contract_address, &chain_name, &ZERO_ADDRESS, &DEAD_ADDRESS],
         )
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
 
-    // Map the retrieved rows to Vec<u64> and then sort
-    let mut token_ids: Vec<u64> = rows
-        .iter()
-        .filter_map(|row| {
-            row.get::<_, Option<String>>("token_id_string")
-                .and_then(|id_string| id_string.parse::<u64>().ok())
-        })
-        .collect();
+    let mut existing_tokens = HashMap::new();  // HashMap<u64, i64>
+    for row in rows {
+        let event = row_to_event(row).await;
+        let ids: Vec<u64> = event.ids
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let values: Vec<u64> = event.values
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
 
-    token_ids.sort(); // Sorting the token IDs
+        let multiplier = if event.from_address.as_deref() == Some(ZERO_ADDRESS) {
+            1i64
+        } else if event.to_address.as_deref() == Some(DEAD_ADDRESS) || event.to_address.as_deref() == Some(ZERO_ADDRESS) {
+            -1i64
+        } else {
+            continue;
+        };
 
-    Ok(token_ids)
+        for (&id, &value) in ids.iter().zip(values.iter()) {
+            *existing_tokens.entry(id).or_insert(0) += value as i64 * multiplier;
+        }
+    }
+
+    let result: Vec<u64> = existing_tokens.into_iter().filter_map(|(id, count)| {
+        if count > 0 { Some(id) } else { None }
+    }).collect();
+
+    Ok(result)
 }
+
+
 
 pub async fn get_token_owners(
     client: &tokio_postgres::Client,
