@@ -1,11 +1,9 @@
 use crate::indexer;
 use indexer::indexer_config::{Chain, Contract};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::convert::From;
-use std::convert::TryInto;
+use std::collections::{HashMap};
 use std::result::Result;
-use tokio_postgres::{Client, Error};
+use tokio_postgres::{Client, Error, GenericClient};
 
 /* DB SCHEMA
 1. chains:
@@ -130,58 +128,15 @@ pub async fn get_earliest_last_processed_block(
     Ok(row.get(0))
 }
 
-async fn update_last_processed_block(
+pub async fn contract_and_chain_to_contractid<C>(
     contract: &Contract,
     chain: &Chain,
-    last_processed_block: u64,
-    client: &Client,
-) -> Result<(), Error> {
-    client
-        .execute(
-            "UPDATE contracts SET last_processed_block = $1 WHERE LOWER(address) = $2 AND chain_id = $3",
-            &[&(last_processed_block as i32), &contract.address.to_lowercase(), &(chain.id as i32)],
-        )
-        .await?;
-
-    Ok(())
-}
-
-pub async fn add_event(
-    chain: &Chain,
-    contract: &Contract,
-    contract_id: i32,
-    event: &Event,
-    client: &Client,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let ids_as_json = serde_json::to_string(&event.ids)?;
-    let values_as_json = serde_json::to_string(&event.values)?;
-
-    client
-            .execute(
-                "INSERT INTO events (contract_id, operator, from_address, to_address, ids, values, block_number, transaction_hash) \
-                VALUES ($1, LOWER($2), LOWER($3), LOWER($4), $5, $6, $7, LOWER($8))",
-                &[
-                    &contract_id,
-                    &event.operator,
-                    &event.from_address,
-                    &event.to_address,
-                    &ids_as_json,
-                    &values_as_json,
-                    &(event.block_number as i32),
-                    &event.transaction_hash,
-                ],
-            )
-            .await?;
-
-    Ok(())
-}
-
-pub async fn contract_and_chain_to_contractid(
-    contract: &Contract,
-    chain: &Chain,
-    client: &Client,
-) -> Result<i32, Error> {
-    let chain_id: i32 = match client
+    client_or_transaction: &C,
+) -> Result<i32, Error>
+    where
+        C: GenericClient
+{
+    let chain_id: i32 = match client_or_transaction
         .query_one(
             "SELECT id FROM chains WHERE LOWER(name) = $1",
             &[&chain.name.to_lowercase()],
@@ -190,8 +145,7 @@ pub async fn contract_and_chain_to_contractid(
     {
         Ok(row) => row.get(0),
         Err(_) => {
-            //println!("Adding chain with name {}", chain.name);
-            client
+            client_or_transaction
                 .query_one(
                     "INSERT INTO chains (name, rpc_url, chunk_size) VALUES ($1, $2, $3) RETURNING id",
                     &[&chain.name, &chain.rpc_url, &(chain.chunk_size as i32)],
@@ -200,7 +154,8 @@ pub async fn contract_and_chain_to_contractid(
                 .get(0)
         }
     };
-    let contract_id: i32 = match client
+
+    let contract_id: i32 = match client_or_transaction
         .query_one(
             "SELECT id FROM contracts WHERE LOWER(address) = $1 AND chain_id = $2",
             &[&contract.address.to_lowercase(), &chain_id],
@@ -209,8 +164,7 @@ pub async fn contract_and_chain_to_contractid(
     {
         Ok(row) => row.get(0),
         Err(_) => {
-            //println!("Adding contract with address {} and name {}", contract.address, contract.name);
-            client
+            client_or_transaction
                 .query_one(
                     "INSERT INTO contracts (chain_id, name, address, type, last_processed_block) VALUES ($1, $2, $3, $4, $5) RETURNING id",
                     &[&chain_id, &contract.name, &contract.address.to_lowercase(), &contract.r#type, &(contract.startblock as i32)],
@@ -219,36 +173,66 @@ pub async fn contract_and_chain_to_contractid(
                 .get(0)
         }
     };
+
     Ok(contract_id)
 }
 
 pub async fn nuke_and_process_events_for_chain(
     chain: &Chain,
-    new_events_by_contract: &HashMap<i32, Vec<Event>>, // key is contract address
+    new_events_by_contract: &HashMap<i32, Vec<Event>>, // key is contract_id
     from_block: u64,
     to_block: u64,
-    client: &Client,
+    client: &mut Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for contract in &chain.contracts {
-        let contract_id = contract_and_chain_to_contractid(contract, chain, client).await?;
-        if let Some(new_events) = new_events_by_contract.get(&contract_id) {
+    let transaction = client.transaction().await?;
 
-            // Delete old events between from_block and now
-            client
+    for contract in &chain.contracts {
+        let contract_id = contract_and_chain_to_contractid(contract, chain, &transaction).await?;
+
+        if let Some(new_events) = new_events_by_contract.get(&contract_id) {
+            // Delete old events between from_block and to_block
+            transaction
                 .execute(
                     "DELETE FROM events WHERE contract_id = $1 AND block_number >= $2 AND block_number <= $3",
                     &[&contract_id, &(from_block as i32), &(to_block as i32)],
                 )
                 .await?;
 
-            // Add new events
+            // Add new events within the transaction context
             for event in new_events {
-                add_event(chain, contract, contract_id, event, client).await?;
+                let ids_as_json = serde_json::to_string(&event.ids)?;
+                let values_as_json = serde_json::to_string(&event.values)?;
+
+                transaction
+                    .execute(
+                        "INSERT INTO events (contract_id, operator, from_address, to_address, ids, values, block_number, transaction_hash) \
+                        VALUES ($1, LOWER($2), LOWER($3), LOWER($4), $5, $6, $7, LOWER($8))",
+                        &[
+                            &contract_id,
+                            &event.operator,
+                            &event.from_address,
+                            &event.to_address,
+                            &ids_as_json,
+                            &values_as_json,
+                            &(event.block_number as i32),
+                            &event.transaction_hash,
+                        ],
+                    )
+                    .await?;
             }
         }
 
-        update_last_processed_block(&contract, &chain, to_block, client).await?;
+        // Update last processed block within the transaction context
+        transaction
+            .execute(
+                "UPDATE contracts SET last_processed_block = $1 WHERE id = $2",
+                &[&(to_block as i32), &contract_id],
+            )
+            .await?;
     }
+
+    // Commit all changes if successful
+    transaction.commit().await?;
 
     Ok(())
 }

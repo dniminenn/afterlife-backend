@@ -16,7 +16,7 @@ async fn main() {
     loop {
         let start = Instant::now();
 
-        let db_client = match database::connect().await {
+        let mut db_client = match database::connect().await {
             Ok(client) => client,
             Err(e) => {
                 println!("Failed to connect to database: {}", e);
@@ -81,7 +81,7 @@ async fn main() {
             let chain = config.chains.iter().find(|c| &c.name == chain_name).unwrap();
             //println!("Processing events for chain {} from block {} to block {}", chain_name, from_block, to_block);
             //println!("All events: {:?}", all_events_by_contract);
-            nuke_and_process_events_for_chain(chain, &all_events_by_contract, *from_block, *to_block, &db_client)
+            nuke_and_process_events_for_chain(chain, &all_events_by_contract, *from_block, *to_block, &mut db_client)
                 .await
                 .expect("Failed to nuke and process events");
         }
