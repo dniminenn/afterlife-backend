@@ -16,7 +16,7 @@ pub struct Chain {
 pub struct Contract {
     pub name: String,
     pub address: String,
-    pub startblock: usize,
+    pub startblock: i32,
     pub r#type: String,
 }
 
@@ -35,8 +35,8 @@ impl IndexerConfig {
         serde_yaml::from_str(&content)
     }
 
-    pub fn get_earliest_start_block_for_chain(&self, chain: &Chain) -> usize {
-        let mut earliest_start_block = usize::MAX;
+    pub fn get_earliest_start_block_for_chain(&self, chain: &Chain) -> i32 {
+        let mut earliest_start_block = i32::MAX;
         for contract in &chain.contracts {
             if contract.startblock < earliest_start_block {
                 earliest_start_block = contract.startblock;

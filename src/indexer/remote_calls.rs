@@ -3,10 +3,20 @@ use crate::indexer::queries::Event;
 use web3::types::{BlockNumber, FilterBuilder, Log, H160, H256, U256};
 use web3::transports::Http;
 use web3::Web3;
+use web3::error::{Error as Web3Error, TransportError};
 use std::convert::TryInto;
 use std::convert::From;
 use std::error::Error;
-use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use futures::stream::{FuturesUnordered, StreamExt};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use tokio::sync::Semaphore;
+use tokio::time::{sleep, Duration};
+use crate::indexer::log_decode::{decode_erc1155_transfer_batch, decode_erc1155_transfer_single};
+
+const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(10);
+const MAX_RETRY_COUNT: usize = 5;
 
 const TRANSFER_TOPIC: H256 = H256([
     0xdd, 0xf2, 0x52, 0xad, 0x1b, 0xe2, 0xc8, 0x9b,
@@ -96,97 +106,287 @@ impl<'a> EventFetcher<'a> {
         }
     }
 
-    pub async fn execute(&self) -> Result<Vec<Event>, EventFetcherError> {
+ /*   pub async fn execute(&self) -> Result<(Vec<Event>, (usize, usize)), EventFetcherError> {
         let mut events = Vec::new();
         let current_block = self.web3.eth().block_number().await?.as_u64() as usize;
 
-        let look_back_start_block = if self.last_processed_block >= self.chain.chunk_size {
-            self.last_processed_block - self.chain.chunk_size
+        let look_back_start_block = if current_block <= self.last_processed_block + 2000 {
+            // If we are within one chunk of the last processed block, look back a full chunk
+            self.last_processed_block.saturating_sub(2000)
         } else {
-            0
+            // If we are beyond one chunk, start at the last processed block
+            self.last_processed_block
         };
+
+        //println!("Look back start block: {}", look_back_start_block);
+        //println!("Last processed: {}", self.last_processed_block);
+        //println!("Current block: {}", current_block);
 
         let start_block = std::cmp::max(
             look_back_start_block,
-            self.chain.contracts.iter().map(|c| c.startblock).min().unwrap_or(0),
+            self.chain.contracts.iter().map(|c| c.startblock).min().unwrap_or(0) as usize,
         );
 
-        for chunk_start in (start_block..=current_block).step_by(self.chain.chunk_size) {
-            let chunk_end = std::cmp::min(chunk_start + self.chain.chunk_size, current_block);
+        let mut from_block = usize::MAX;
+        let mut to_block = 0;
 
-            let addresses: Result<Vec<H160>, _> = self.chain.contracts.iter()
-                .map(|contract| contract.address.parse())
+        let chunks: Vec<(usize, usize)> = (start_block..current_block)
+            .step_by(self.chain.chunk_size)
+            .map(|start| {
+                let end = std::cmp::min(start + self.chain.chunk_size - 1, current_block);
+                (start, end)
+            })
+            .collect();
+
+        let total_chunks = chunks.len() as f64; // Cast to f64 for floating-point division
+        //println!("Total chunks: {}, start block: {}, current block: {}", total_chunks, start_block, current_block);
+        let mut current_chunk = 0; // Initialize a counter for the current chunk
+
+        for (chunk_start, chunk_end) in chunks {
+            //println!("Fetching logs for chunk {} to {} for chain {}", chunk_start, chunk_end, self.chain.name);
+            from_block = std::cmp::min(from_block, chunk_start);
+            to_block = std::cmp::max(to_block, chunk_end);
+
+            let addresses: Vec<H160> = self.chain.contracts.iter()
+                .filter_map(|contract| contract.address.parse().ok())
                 .collect();
-
-            let addresses = addresses?;
-            println!("Fetching events for {} contracts from block {} to {}", addresses.len() ,chunk_start, chunk_end);
 
             let filter = FilterBuilder::default()
                 .from_block(BlockNumber::Number(chunk_start.into()))
                 .to_block(BlockNumber::Number(chunk_end.into()))
                 .address(addresses)
+                .topics(Some(vec![TRANSFER_TOPIC, TRANSFER_SINGLE_TOPIC, TRANSFER_BATCH_TOPIC]), None, None, None)
                 .build();
 
-            let logs = self.web3.eth().logs(filter).await?;
+            let mut retry_delay = INITIAL_RETRY_DELAY;
+            let mut attempts = 0;
 
-            for log in logs {
-
-                let contract = self.chain.contracts.iter().find(|&c| {
-                    // Directly parse and compare H160 types
-                    c.address.parse::<H160>().unwrap_or_default() == log.address
-                });
-
-
-                if contract.is_some() {
-                    let event;
-
-                    if log.topics[0] == TRANSFER_TOPIC {
-                        event = self.erc721_to_dbevent(&log)?;
-                    } else if log.topics[0] == TRANSFER_SINGLE_TOPIC {
-                        event = self.erc1155_to_single_dbevent(&log)?;
-                    } else if log.topics[0] == TRANSFER_BATCH_TOPIC {
-                        event = self.erc1155_to_batch_dbevent(&log)?;
-                    } else {
-                        //println!("Unknown event topic: {:?}", log.topics[0]);
-                        continue;
+            loop {
+                match self.web3.eth().logs(filter.clone()).await {
+                    Ok(logs) => {
+                        for log in logs {
+                            let contract_address = log.address;
+                            if let Some(contract) = self.chain.contracts.iter().find(|&c| {
+                                c.address.parse::<H160>().unwrap_or_default() == contract_address
+                            }) {
+                                let event = if log.topics[0] == TRANSFER_TOPIC {
+                                    self.erc721_to_dbevent(&log, contract)?
+                                } else if log.topics[0] == TRANSFER_SINGLE_TOPIC {
+                                    self.erc1155_to_single_dbevent(&log, contract)?
+                                } else if log.topics[0] == TRANSFER_BATCH_TOPIC {
+                                    self.erc1155_to_batch_dbevent(&log, contract)?
+                                } else {
+                                    continue;
+                                };
+                                events.push(event);
+                            }
+                        }
+                        break; // Exit the retry loop on success
+                    },
+                    Err(e) => {
+                        if attempts >= MAX_RETRY_COUNT {
+                            eprintln!("Failed to fetch logs after {} attempts: {:?}", MAX_RETRY_COUNT, e);
+                            panic!("Failed to fetch logs after {} attempts: {:?}", MAX_RETRY_COUNT, e);
+                            //break; // Break the loop to avoid crashing and continue with the next chunk
+                        } else {
+                            match &e {
+                                Web3Error::Transport(TransportError::Code(code)) => {
+                                    eprintln!("Transport error with code {}: {}. Retrying in {:?}... (Attempt {} of {})", code, e, retry_delay, attempts + 1, MAX_RETRY_COUNT);
+                                }
+                                Web3Error::Transport(TransportError::Message(message)) => {
+                                    eprintln!("Transport error with message {}: {}. Retrying in {:?}... (Attempt {} of {})", message, e, retry_delay, attempts + 1, MAX_RETRY_COUNT);
+                                }
+                                _ => {
+                                    eprintln!("Error fetching logs: {}. Retrying in {:?}... (Attempt {} of {})", e, retry_delay, attempts + 1, MAX_RETRY_COUNT);
+                                }
+                            }
+                            tokio::time::sleep(retry_delay).await;
+                            retry_delay *= 2;
+                            attempts += 1;
+                        }
                     }
+                }
+            }
+            current_chunk += 1; // Increment the chunk counter
+            let progress_percentage = (current_chunk as f64 / total_chunks) * 100.0;
+            println!("Progress: {:.2}% for chain {}", progress_percentage, self.chain.name);
 
-                    events.push(event);
+            // Ensure that the percentage does not exceed 100% due to rounding
+            if current_chunk as usize == total_chunks as usize {
+                println!("Progress: 100% for chain {}", self.chain.name);
+            }
+        }
+
+        // Ensure that the return type matches the function signature
+        Ok((events, (from_block, to_block)))
+    }*/
+    pub async fn execute(&self) -> Result<(Vec<Event>, (usize, usize)), EventFetcherError> {
+        let mut events = Vec::new();
+        let current_block = self.web3.eth().block_number().await?.as_u64() as usize;
+
+        let look_back_start_block = if current_block <= self.last_processed_block + 2000 {
+            // If we are within one chunk of the last processed block, look back a full chunk
+            self.last_processed_block.saturating_sub(2000)
+        } else {
+            // If we are beyond one chunk, start at the last processed block
+            self.last_processed_block
+        };
+
+        //println!("Look back start block: {}", look_back_start_block);
+        //println!("Last processed: {}", self.last_processed_block);
+        //println!("Current block: {}", current_block);
+
+        let start_block = std::cmp::max(
+            look_back_start_block,
+            self.chain.contracts.iter().map(|c| c.startblock).min().unwrap_or(0) as usize,
+        );
+
+        let mut from_block = usize::MAX;
+        let mut to_block = 0;
+
+        let chunks: Vec<(usize, usize)> = (start_block..current_block)
+            .step_by(self.chain.chunk_size)
+            .map(|start| {
+                let end = std::cmp::min(start + self.chain.chunk_size - 1, current_block);
+                (start, end)
+            })
+            .collect();
+
+        let current_chunk = Arc::new(AtomicUsize::new(0));
+        let total_chunks = chunks.len() as f64; // Cast to f64 for floating-point division
+
+        let semaphore = Arc::new(Semaphore::new(20)); // limit to 2 concurrent tasks
+
+        let mut tasks = FuturesUnordered::new();
+
+        for (chunk_start, chunk_end) in chunks {
+            let current_chunk_clone = Arc::clone(&current_chunk);
+            let addresses: Vec<H160> = self.chain.contracts.iter()
+                .filter_map(|contract| contract.address.parse().ok())
+                .collect();
+
+            let filter = FilterBuilder::default()
+                .from_block(BlockNumber::Number(chunk_start.into()))
+                .to_block(BlockNumber::Number(chunk_end.into()))
+                .address(addresses)
+                .topics(Some(vec![TRANSFER_TOPIC, TRANSFER_SINGLE_TOPIC, TRANSFER_BATCH_TOPIC]), None, None, None)
+                .build();
+
+            let web3 = self.web3.clone();
+            let semaphore_clone = semaphore.clone();
+
+            tasks.push(async move {
+                let _permit = semaphore_clone.acquire_owned().await.expect("Failed to acquire semaphore permit");
+                let mut retry_delay = INITIAL_RETRY_DELAY;
+                let mut attempts = 0;
+
+                loop {
+                    match web3.eth().logs(filter.clone()).await {
+                        Ok(logs) => {
+                            let mut events_chunk = Vec::new();
+                            for log in logs {
+                                // Your logic to convert logs to events goes here
+                                let contract_address = log.address;
+                                if let Some(contract) = self.chain.contracts.iter().find(|&c| {
+                                    c.address.parse::<H160>().unwrap_or_default() == contract_address
+                                }) {
+                                    let event = if log.topics[0] == TRANSFER_TOPIC {
+                                        self.erc721_to_dbevent(&log, contract)?
+                                    } else if log.topics[0] == TRANSFER_SINGLE_TOPIC {
+                                        self.erc1155_to_single_dbevent(&log, contract)?
+                                    } else if log.topics[0] == TRANSFER_BATCH_TOPIC {
+                                        self.erc1155_to_batch_dbevent(&log, contract)?
+                                    } else {
+                                        eprintln!("Unknown topic: {:?}", log.topics[0]);
+                                        eprintln!("Log: {:?}", log);
+                                        continue;
+                                    };
+                                    events_chunk.push(event);
+                                }
+                            }
+                            // After processing each chunk, we increment the counter
+                            let task_chunk_index = current_chunk_clone.fetch_add(1, Ordering::SeqCst);
+
+                            // We calculate the progress
+                            let progress = ((task_chunk_index + 1) as f64 / total_chunks) * 100.0;
+                            //println!("Chunk {} of {} completed. Progress: {:.2}%", task_chunk_index + 1, total_chunks, progress);
+                            return Ok((events_chunk, (chunk_start, chunk_end)));
+                        },
+                        Err(e) => {
+                            if attempts >= MAX_RETRY_COUNT {
+                                panic!("Failed to fetch logs after {} attempts: {:?}", MAX_RETRY_COUNT, e);
+                                return Err(EventFetcherError::from(e));
+                            }
+                            eprintln!("Error fetching logs: {}. Retrying in {:?}... (Attempt {} of {})", e, retry_delay, attempts + 1, MAX_RETRY_COUNT);
+                            sleep(retry_delay).await;
+                            retry_delay *= 2;
+                            attempts += 1;
+                        }
+                    }
+                }
+            });
+        }
+
+        while let Some(result) = tasks.next().await {
+            match result {
+                Ok((mut events_chunk, (chunk_start, chunk_end))) => {
+                    from_block = std::cmp::min(from_block, chunk_start);
+                    to_block = std::cmp::max(to_block, chunk_end);
+
+                    events.append(&mut events_chunk);
+                },
+                Err(e) => {
+                    // Handle any errors that arose within the spawned tasks
+                    panic!("Error fetching logs: {:?}", e)
                 }
             }
         }
-        Ok(events)
+
+        Ok((events, (from_block, to_block)))
     }
 
 
-    fn erc721_to_dbevent(&self, log: &Log) -> Result<Event, EventFetcherError> {
-        //println!("ERC721 event: {:?}", log);
+    fn erc721_to_dbevent(&self, log: &Log, contract: &Contract) -> Result<Event, EventFetcherError> {
+
         let from_address: H160 = log.topics[1].try_into().unwrap();
         let to_address: H160 = log.topics[2].try_into().unwrap();
-        let ids: Vec<u64> = vec![U256::from_big_endian(&log.data.0).as_u64()];
+        // id is topics[3]
+        let id: u64 = U256::from_big_endian(&log.topics[3].0).as_u64();
+        let ids: Vec<u64> = vec![id];
         let values: Vec<u64> = vec![1];  // For ERC721, the value is always 1
 
         Ok(Event::new(
-            "ERC721".to_string(),
+            contract.clone(),
             format!("{:?}", from_address),
+            format!("{:?}", to_address),
             format!("{:?}", to_address),
             ids,
             values,
             log.block_number.unwrap().as_u64(),
-            format!("{:?}", log.transaction_hash.unwrap())
+
+            format!("{:?}", log.transaction_hash.unwrap()),
+
         ).map_err(|e| EventFetcherError::Custom(e.into()))?)
     }
 
-    fn erc1155_to_single_dbevent(&self, log: &Log) -> Result<Event, EventFetcherError> {
+    fn erc1155_to_single_dbevent(&self, log: &Log, contract: &Contract) -> Result<Event, EventFetcherError> {
         //println!("ERC1155 single event: {:?}", log);
         let operator: H160 = log.topics[1].try_into().unwrap();
         let from_address: H160 = log.topics[2].try_into().unwrap();
         let to_address: H160 = log.topics[3].try_into().unwrap();
 
-        let ids: Vec<u64> = vec![U256::from(&log.data.0[0..32]).as_u64()];
-        let values: Vec<u64> = vec![U256::from(&log.data.0[32..64]).as_u64()];
+        let (id, value) = decode_erc1155_transfer_single(&log)
+            .map_err(|e| EventFetcherError::Custom(e.into()))?;
+
+        let ids: Vec<u64> = vec![id];
+        let values: Vec<u64> = vec![value];
+
+        // format!("{:?}", operator) will make the type printable but it will be lowercase
+        // to get the checksum address, we need to parse it and then print it
+
 
         Ok(Event::new(
+            contract.clone(),
             format!("{:?}", operator),
             format!("{:?}", from_address),
             format!("{:?}", to_address),
@@ -197,22 +397,20 @@ impl<'a> EventFetcher<'a> {
         ).map_err(|e| EventFetcherError::Custom(e.into()))?)
     }
 
-    fn erc1155_to_batch_dbevent(&self, log: &Log) -> Result<Event, EventFetcherError> {
+    fn erc1155_to_batch_dbevent(&self, log: &Log, contract: &Contract) -> Result<Event, EventFetcherError> {
         //println!("ERC1155 batch event: {:?}", log);
         let operator: H160 = log.topics[1].try_into().unwrap();
         let from_address: H160 = log.topics[2].try_into().unwrap();
         let to_address: H160 = log.topics[3].try_into().unwrap();
 
         // Assuming the rest of the data field is ids concatenated with values
-        let ids_values = &log.data.0;
-        let half_len = ids_values.len() / 2;
-        let ids_data = &ids_values[0..half_len];
-        let values_data = &ids_values[half_len..];
+        //println!("Data: {:?}", log.data.0);
 
-        let ids: Vec<u64> = ids_data.chunks(32).map(|chunk| U256::from(chunk).as_u64()).collect();
-        let values: Vec<u64> = values_data.chunks(32).map(|chunk| U256::from(chunk).as_u64()).collect();
+        let (ids, values) = decode_erc1155_transfer_batch(&log)
+            .map_err(|e| EventFetcherError::Custom(e.into()))?;
 
         Ok(Event::new(
+            contract.clone(),
             format!("{:?}", operator),
             format!("{:?}", from_address),
             format!("{:?}", to_address),
