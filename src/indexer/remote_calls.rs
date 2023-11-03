@@ -8,6 +8,7 @@ use std::convert::TryInto;
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use bigdecimal::num_traits::AsPrimitive;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
 use web3::error::{Error as Web3Error, TransportError};
@@ -147,11 +148,6 @@ impl<'a> EventFetcher<'a> {
         let mut tasks = FuturesUnordered::new();
 
         for (chunk_start, chunk_end) in chunks {
-            let actual_chunk_end = if current_block - chunk_end < self.chain.chunk_size {
-                BlockNumber::Latest
-            } else {
-                BlockNumber::Number(chunk_end.into())
-            };
             let current_chunk_clone = Arc::clone(&current_chunk);
             let addresses: Vec<H160> = self
                 .chain
@@ -162,7 +158,7 @@ impl<'a> EventFetcher<'a> {
 
             let filter = FilterBuilder::default()
                 .from_block(BlockNumber::Number(chunk_start.into()))
-                .to_block(actual_chunk_end)
+                .to_block(BlockNumber::Number(chunk_end.into()))
                 .address(addresses)
                 .topics(
                     Some(vec![
@@ -271,9 +267,9 @@ impl<'a> EventFetcher<'a> {
         let from_address: H160 = log.topics[1].try_into().unwrap();
         let to_address: H160 = log.topics[2].try_into().unwrap();
         // id is topics[3]
-        let id: u64 = U256::from_big_endian(&log.topics[3].0).as_u64();
-        let ids: Vec<u64> = vec![id];
-        let values: Vec<u64> = vec![1]; // For ERC721, the value is always 1
+        let id = U256::from_big_endian(&log.topics[3].0);
+        let ids = vec![id];
+        let values: Vec<U256> = vec![U256::from(1)]; // For ERC721, the value is always 1
 
         Ok(Event::new(
             contract.clone(),
@@ -301,8 +297,8 @@ impl<'a> EventFetcher<'a> {
         let (id, value) = decode_erc1155_transfer_single(&log)
             .map_err(|e| EventFetcherError::Custom(e.into()))?;
 
-        let ids: Vec<u64> = vec![id];
-        let values: Vec<u64> = vec![value];
+        let ids: Vec<U256> = vec![id];
+        let values: Vec<U256> = vec![value];
 
         // format!("{:?}", operator) will make the type printable but it will be lowercase
         // to get the checksum address, we need to parse it and then print it

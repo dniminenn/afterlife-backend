@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap};
 use std::result::Result;
 use tokio_postgres::{Client, Error, GenericClient};
+extern crate primitive_types;
+
+use web3::types::U256;
 
 /* DB SCHEMA
 1. chains:
@@ -43,8 +46,8 @@ pub struct Event {
     pub operator: String,
     pub from_address: String,
     pub to_address: String,
-    pub ids: Vec<u64>,
-    pub values: Vec<u64>,
+    pub ids: Vec<U256>,
+    pub values: Vec<U256>,
     pub block_number: u64,
     pub transaction_hash: String,
 }
@@ -56,8 +59,8 @@ impl Event {
         operator: String,
         from_address: String,
         to_address: String,
-        ids: Vec<u64>,
-        values: Vec<u64>,
+        ids: Vec<U256>,
+        values: Vec<U256>,
         block_number: u64,
         transaction_hash: String,
     ) -> Result<Self, &'static str> {
@@ -87,8 +90,8 @@ impl Event {
         block_number: u64,
         transaction_hash: String,
     ) -> Result<Self, &'static str> {
-        let ids: Vec<u64> = serde_json::from_str(&ids).unwrap();
-        let values: Vec<u64> = serde_json::from_str(&values).unwrap();
+        let ids: Vec<U256> = serde_json::from_str(&ids).unwrap_or_else(|_| Vec::new());
+        let values: Vec<U256> = serde_json::from_str(&values).unwrap_or_else(|_| Vec::new());
 
         Event::new(
             contract,
@@ -167,7 +170,7 @@ pub async fn contract_and_chain_to_contractid<C>(
             client_or_transaction
                 .query_one(
                     "INSERT INTO contracts (chain_id, name, address, type, last_processed_block) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-                    &[&chain_id, &contract.name, &contract.address.to_lowercase(), &contract.r#type, &(contract.startblock as i32)],
+                    &[&chain_id, &contract.name, &contract.address.to_lowercase(), &contract.r#type, &(contract.startblock )],
                 )
                 .await?
                 .get(0)

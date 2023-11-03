@@ -42,6 +42,7 @@ dependencies = [
  "tiny-keccak",
  "tokio",
  "tokio-postgres",
+ "uint",
  "warp",
  "web3",
 ]
