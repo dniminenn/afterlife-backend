@@ -1,9 +1,9 @@
 use serde_json::from_str;
 use std::collections::HashMap;
-use std::error::Error;
 use std::option::Option;
 use tokio_postgres::Row;
 use warp::Filter;
+use web3::types::U256;
 
 const DEAD_ADDRESS: &str = "0x000000000000000000000000000000000000dEaD";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -164,7 +164,7 @@ pub async fn get_entire_collection(
 
 
 
-/*pub async fn get_token_owners(
+pub async fn get_token_owners(
     client: &tokio_postgres::Client,
     chain_name: &str,
     contract_address: &str,
@@ -229,14 +229,14 @@ pub async fn get_entire_collection(
         .collect();
 
     Ok(owner_addresses)
-}*/
+}
 
-pub async fn get_token_owners(
+/*pub async fn get_token_owners(
     client: &tokio_postgres::Client,
     chain_name: &str,
     contract_address: &str,
     token_id: u64,
-) -> Result<HashMap<String, i64>, Box<dyn Error + Send>> {
+) -> Result<HashMap<String, u64>, Box<dyn std::error::Error + Send>> {
     // Retrieve token events from the database
     let rows = client
         .query(
@@ -258,13 +258,13 @@ pub async fn get_token_owners(
     }
 
     // Process events to determine token owners and their balances
-    let mut owners: HashMap<String, i64> = HashMap::new();  // Use u64 for balances
+    let mut owners: HashMap<String, u64> = HashMap::new();  // Use u64 for balances
 
     for event in &events {
         let ids: Vec<u64> = event.ids.as_ref()
             .and_then(|s| from_str(s).ok())
             .unwrap_or_default();
-        let values: Vec<i64> = event.values.as_ref()
+        let values: Vec<u64> = event.values.as_ref()
             .and_then(|s| from_str(s).ok())
             .unwrap_or_default();
 
@@ -289,5 +289,5 @@ pub async fn get_token_owners(
     println!("Found {} owners", owners.len());
 
     Ok(owners)
-}
+}*/
 
