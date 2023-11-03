@@ -1,21 +1,22 @@
 use crate::backend;
 use crate::backend::queries::{get_all_users_collections, get_user_full_collection};
+use crate::backend::usernames::get_username_or_checksummed_address;
 use crate::common;
 use backend::queries;
 use common::file_loader::{load_users_data, read_file};
 use eth_checksum::checksum;
-use serde_json::{json, Value};
+use once_cell::sync::Lazy;
+use serde_json::{json, Map, Number, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
 use std::{env, fs};
+use tokio::sync::Mutex;
 use tokio_postgres::Client;
+use warp::http::Response;
 use warp::reject::{Reject, Rejection};
 use warp::{Filter, Reply};
-use warp::http::Response;
-use once_cell::sync::Lazy;
-use tokio::sync::Mutex;
 
 #[derive(Debug)]
 struct CustomReject(String);
@@ -28,7 +29,8 @@ struct ErrorResponse {
 }
 
 type CollectionsType = HashMap<String, HashMap<String, HashMap<String, HashMap<u64, i64>>>>;
-static ALL_USERS_COLLECTIONS_CACHE: Lazy<Mutex<Option<CollectionsType>>> = Lazy::new(|| Mutex::new(None));
+static ALL_USERS_COLLECTIONS_CACHE: Lazy<Mutex<Option<CollectionsType>>> =
+    Lazy::new(|| Mutex::new(None));
 
 pub async fn run_server(client: Arc<Client>) {
     //let client = Arc::new(client);
@@ -74,7 +76,9 @@ pub async fn run_server(client: Arc<Client>) {
         .await;
 }
 
-fn with_db(client: Arc<Client>) -> impl Filter<Extract = (Arc<Client>,), Error = Infallible> + Clone {
+fn with_db(
+    client: Arc<Client>,
+) -> impl Filter<Extract = (Arc<Client>,), Error = Infallible> + Clone {
     warp::any().map(move || client.clone())
 }
 
@@ -273,26 +277,19 @@ async fn handle_get_token_owners(
 async fn handle_get_username_by_wallet(
     body: HashMap<String, String>,
 ) -> Result<impl warp::Reply, Rejection> {
-    //println!("Handling get username by wallet, body: {:?}", body);
-    let wallet_address = match body.get("address") {
-        Some(address) => address,
-        None => {
-            return Err(warp::reject::custom(CustomReject(
-                "Address not provided".to_string(),
-            )))
-        }
-    };
+    let wallet_address = body
+        .get("address")
+        .ok_or_else(|| warp::reject::custom(CustomReject("Address not provided".to_string())))?;
 
-    let users_data = load_users_data().await;
-
-    match users_data.get(wallet_address) {
-        Some(username) => Ok(warp::reply::with_status(
-            warp::reply::json(&json!({ "username": username })),
+    match get_username_or_checksummed_address(wallet_address).await {
+        Ok(Some(result)) => Ok(warp::reply::with_status(
+            warp::reply::json(&json!({ "username": result })),
             warp::http::StatusCode::OK,
         )),
-        None => Err(warp::reject::custom(CustomReject(
+        Ok(None) => Err(warp::reject::custom(CustomReject(
             "Wallet address not found".to_string(),
         ))),
+        Err(error_message) => Err(warp::reject::custom(CustomReject(error_message))),
     }
 }
 
@@ -300,7 +297,10 @@ async fn handle_get_user_full_collection(
     user_address: String,
     client: Arc<Client>,
 ) -> Result<impl warp::Reply, Rejection> {
-    println!("Handling get user full collection, user_address: {}", user_address);
+    println!(
+        "Handling get user full collection, user_address: {}",
+        user_address
+    );
     match get_user_full_collection(&*client, &user_address).await {
         Ok(collection) => Ok(warp::reply::json(&collection).into_response()),
         Err(_) => Err(warp::reject::custom(CustomReject(
@@ -350,16 +350,19 @@ async fn handle_get_user_rarity_score(
     Ok(warp::reply::json(&json!({ "total_rarity_score": total_rarity_score })).into_response())
 }
 
-async fn handler_leaderboard(
-    client: Arc<Client>,
-) -> Result<impl Reply, Rejection> {
-    let all_users_collections = get_or_update_all_users_collections(&*client).await?;
+async fn handler_leaderboard(client: Arc<Client>) -> Result<impl Reply, Rejection> {
+    let all_users_collections = get_or_update_all_users_collections(&*client, false).await?;
 
-    let path_rarities = env::var("AFTERLIFE_PATH_RARITIES").expect("Expected AFTERLIFE_PATH_RARITIES to be set");
+    let path_rarities =
+        env::var("AFTERLIFE_PATH_RARITIES").expect("Expected AFTERLIFE_PATH_RARITIES to be set");
 
     let mut leaderboard: Vec<(String, f64)> = Vec::new();
 
+    let mut user_scores: HashMap<String, f64> = HashMap::new();
+
     for (user_address, user_collection) in all_users_collections {
+        let username_or_addr = get_username_or_checksummed_address(&user_address).await.unwrap_or(Some(user_address.clone())).unwrap_or_default();
+
         let mut total_rarity_score: f64 = 0.0;
 
         for (chain, contracts) in user_collection {
@@ -383,38 +386,43 @@ async fn handler_leaderboard(
         }
 
         total_rarity_score = (total_rarity_score * 1000.0).round();
-        leaderboard.push((user_address, total_rarity_score));
+        let score = user_scores.entry(username_or_addr).or_insert(0.0);
+        *score += total_rarity_score;
     }
 
-    // Sort the leaderboard by rarity score in descending order
-    //leaderboard.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-
-    let mut json_leaderboard = serde_json::Map::new();
-    for (address, score) in leaderboard {
-        // Insert the address and score into the map, converting the score to an integer.
-        json_leaderboard.insert(address, serde_json::Value::Number(serde_json::Number::from(score as i64)));
+    // Convert scores to JSON
+    let mut json_leaderboard = Map::new();
+    for (username_or_addr, score) in user_scores {
+        json_leaderboard.insert(
+            username_or_addr,
+            Value::Number(Number::from_f64(score).expect("Invalid score")),
+        );
     }
 
-    // Serialize the map into a JSON object
-    let json_response = serde_json::Value::Object(json_leaderboard);
-
+    let json_response = Value::Object(json_leaderboard);
     Ok(warp::reply::json(&json_response).into_response())
 }
 
-pub async fn get_or_update_all_users_collections(client: &Client) -> Result<CollectionsType, Rejection> {
+pub async fn get_or_update_all_users_collections(
+    client: &Client,
+    force_update: bool,
+) -> Result<CollectionsType, Rejection> {
     let mut cache = ALL_USERS_COLLECTIONS_CACHE.lock().await;
-    if let Some(cached) = cache.as_ref() {
-        Ok(cached.clone()) // Return cached value if present
-    } else {
-        // If not cached, get from the function and cache it
-        match get_all_users_collections(client).await {
-            Ok(collections) => {
-                *cache = Some(collections.clone());
-                Ok(collections)
-            }
-            Err(_) => Err(warp::reject::custom(CustomReject(
-                "Failed to fetch collections for all users".to_string(),
-            ))),
+
+    if !force_update {
+        if let Some(cached) = cache.as_ref() {
+            return Ok(cached.clone()); // Return cached value if present and no force update
         }
+    }
+
+    // Fetch new data because either cache is empty or we're forcing an update
+    match get_all_users_collections(client).await {
+        Ok(collections) => {
+            *cache = Some(collections.clone()); // Update cache with new data
+            Ok(collections)
+        }
+        Err(_) => Err(warp::reject::custom(CustomReject(
+            "Failed to fetch collections for all users".to_string(),
+        ))),
     }
 }

@@ -14,14 +14,14 @@ async fn main() {
     // Clone the shared client for the update task
     let update_client = shared_db_client.clone();
 
-    // Define the period of the cache update task, e.g., every 5 minutes.
-    let update_period = Duration::from_secs(5 * 60); // 5 minutes
+    // Define the period of the cache update task
+    let update_period = Duration::from_secs(30); // 30 seconds
     let mut interval = time::interval(update_period);
 
     tokio::spawn(async move {
         loop {
             interval.tick().await;
-            if let Err(e) = get_or_update_all_users_collections(&update_client).await {
+            if let Err(e) = get_or_update_all_users_collections(&update_client, true).await {
                 eprintln!("Failed to update cache: {:?}", e);
             }
         }
