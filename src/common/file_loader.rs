@@ -6,14 +6,6 @@ use serde_json;
 use tokio::io;
 use std::{env, fs};
 
-/*pub async fn read_file(path: &Path) -> io::Result<String> {
-    let file = File::open(path).await?;
-    let mut buf_reader = BufReader::new(file);
-    let mut contents = String::new();
-    buf_reader.read_to_string(&mut contents).await?;
-    Ok(contents)
-}*/
-
 pub async fn read_file(path: &Path) -> io::Result<String> {
     let file_name_lowercase = path
         .file_name()
