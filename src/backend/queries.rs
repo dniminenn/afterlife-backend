@@ -29,7 +29,7 @@ pub async fn get_entire_collection_for_address(
     chain_name: &str,
     contract_address: &str,
     wallet_address: &str,
-) -> Result<HashMap<u64, u64>, Box<dyn std::error::Error + Send>> {
+) -> Result<HashMap<u64, i64>, Box<dyn std::error::Error + Send>> {
     let wallet_address_lowercase = wallet_address.to_lowercase();
     let rows = client
         .query(
@@ -38,7 +38,8 @@ pub async fn get_entire_collection_for_address(
             FROM events e
             JOIN contracts c ON e.contract_id = c.id
             JOIN chains ch ON c.chain_id = ch.id
-            WHERE LOWER(c.address) = $1 AND LOWER(ch.name) = $2 AND (e.from_address = $3 OR e.to_address = $3)
+            WHERE LOWER(c.address) = $1 AND LOWER(ch.name) = $2 AND
+            (LOWER(e.from_address) = $3 OR LOWER(e.to_address) = $3)
             "#,
             &[&contract_address.to_lowercase(), &chain_name.to_lowercase(), &wallet_address_lowercase],
         )
@@ -52,56 +53,42 @@ pub async fn get_entire_collection_for_address(
         events.push(row_to_event(row).await);
     }
 
-    // To address events - incoming transfers
-    for event in &events {
-        if let Some(to_address) = &event.to_address {
-            if to_address == &wallet_address_lowercase {
-                let ids: Vec<u64> = event
-                    .ids
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                let values: Vec<u64> = event
-                    .values
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+    //println!("Found {} events for {} on {}", events.len(), wallet_address, contract_address);
 
-                for (&id, &value) in ids.iter().zip(values.iter()) {
+    // Process events to determine token owners and their balances
+    // Using i64 to allow for negative values temporarily
+    // Convert all addresses to lowercase for comparison
+    for event in events {
+        let ids: Vec<u64> = event
+            .ids
+            .as_deref()
+            .and_then(|s| from_str(s).ok())
+            .unwrap_or_default();
+        let values: Vec<i64> = event
+            .values
+            .as_deref()
+            .and_then(|s| from_str::<Vec<u64>>(s).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v as i64) // Convert u64 values to i64 for arithmetic
+            .collect();
+
+        for (&id, &value) in ids.iter().zip(values.iter()) {
+            if let Some(to_address) = &event.to_address {
+                if to_address.to_lowercase() == wallet_address_lowercase {
                     *balances.entry(id).or_insert(0) += value;
                 }
             }
-        }
-    }
-
-    // From address events - outgoing transfers
-    for event in &events {
-        if let Some(from_address) = &event.from_address {
-            if from_address == &wallet_address_lowercase {
-                let ids: Vec<u64> = event
-                    .ids
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                let values: Vec<u64> = event
-                    .values
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-
-                for (&id, &value) in ids.iter().zip(values.iter()) {
-                    *balances.entry(id).or_insert(0) = balances
-                        .get(&id)
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_sub(value);
+            if let Some(from_address) = &event.from_address {
+                if from_address.to_lowercase() == wallet_address_lowercase {
+                    *balances.entry(id).or_insert(0) -= value;
                 }
             }
         }
     }
 
     // Remove any items that have a zero balance
-    balances.retain(|_, &mut value| value > 0);
+    balances.retain(|_, &mut value | value > 0);
 
     Ok(balances)
 }
@@ -125,26 +112,35 @@ pub async fn get_entire_collection(
                 LOWER(e.to_address) = $4
             )
             "#,
-            &[&contract_address.to_lowercase(), &chain_name.to_lowercase(), &ZERO_ADDRESS.to_lowercase(), &DEAD_ADDRESS.to_lowercase()],
+            &[
+                &contract_address.to_lowercase(),
+                &chain_name.to_lowercase(),
+                &ZERO_ADDRESS.to_lowercase(),
+                &DEAD_ADDRESS.to_lowercase(),
+            ],
         )
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
 
-    let mut existing_tokens = HashMap::new();  // HashMap<u64, i64>
+    let mut existing_tokens = HashMap::new(); // HashMap<u64, i64>
     for row in rows {
         let event = row_to_event(row).await;
-        let ids: Vec<u64> = event.ids
+        let ids: Vec<u64> = event
+            .ids
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
-        let values: Vec<u64> = event.values
+        let values: Vec<u64> = event
+            .values
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
 
         let multiplier = if event.from_address.as_deref() == Some(ZERO_ADDRESS) {
             1i64
-        } else if event.to_address.as_deref() == Some(DEAD_ADDRESS) || event.to_address.as_deref() == Some(ZERO_ADDRESS) {
+        } else if event.to_address.as_deref() == Some(DEAD_ADDRESS)
+            || event.to_address.as_deref() == Some(ZERO_ADDRESS)
+        {
             -1i64
         } else {
             continue;
@@ -155,14 +151,13 @@ pub async fn get_entire_collection(
         }
     }
 
-    let result: Vec<u64> = existing_tokens.into_iter().filter_map(|(id, count)| {
-        if count > 0 { Some(id) } else { None }
-    }).collect();
+    let result: Vec<u64> = existing_tokens
+        .into_iter()
+        .filter_map(|(id, count)| if count > 0 { Some(id) } else { None })
+        .collect();
 
     Ok(result)
 }
-
-
 
 pub async fn get_token_owners(
     client: &tokio_postgres::Client,
@@ -170,7 +165,6 @@ pub async fn get_token_owners(
     contract_address: &str,
     token_id: u64,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send>> {
-
     // Retrieve token events from the database
     let rows = client
         .query(
@@ -192,19 +186,21 @@ pub async fn get_token_owners(
     }
 
     // Process events to determine token owners and their balances
-    let mut owners: HashMap<String, i64> = HashMap::new();  // Using i64 to allow for negative values temporarily
+    let mut owners: HashMap<String, i64> = HashMap::new(); // Using i64 to allow for negative values temporarily
 
     for event in events {
         let ids: Vec<u64> = event
-            .ids.as_deref()
+            .ids
+            .as_deref()
             .and_then(|s| from_str(s).ok())
             .unwrap_or_default();
         let values: Vec<i64> = event
-            .values.as_deref()
+            .values
+            .as_deref()
             .and_then(|s| from_str::<Vec<u64>>(s).ok())
             .unwrap_or_default()
             .into_iter()
-            .map(|v| v as i64)  // Convert u64 values to i64 for arithmetic
+            .map(|v| v as i64) // Convert u64 values to i64 for arithmetic
             .collect();
 
         for (&id, &value) in ids.iter().zip(values.iter()) {
@@ -230,4 +226,3 @@ pub async fn get_token_owners(
 
     Ok(owner_addresses)
 }
-

@@ -155,6 +155,7 @@ async fn handle_get_collection_for_address(
         .map_err(|e| format!("Failed to get collection: {}", e))
     {
         Ok(balances) => {
+            //println!("Found {} balances for {} on {}", balances.len(), wallet_address, contract_address);
             let rarity_path = format!("{}/{}_{}_rarity.json", path_rarities, chain_name, checksum(contract_address.as_str()));
             let rarity_data = read_file(Path::new(&rarity_path)).await;
             let rarity_map = build_rarity_map(rarity_data);
