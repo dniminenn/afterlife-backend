@@ -90,6 +90,8 @@ pub async fn get_entire_collection_for_address(
     // Remove any items that have a zero balance
     balances.retain(|_, &mut value | value > 0);
 
+    //println!("Found {} balances for {} on {}", balances.len(), wallet_address, contract_address);
+
     Ok(balances)
 }
 
@@ -121,6 +123,8 @@ pub async fn get_entire_collection(
         )
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
+
+    //println!("Found {} events for {} on {}", rows.len(), contract_address, chain_name);
 
     let mut existing_tokens = HashMap::new(); // HashMap<u64, i64>
     for row in rows {
@@ -216,6 +220,7 @@ pub async fn get_token_owners(
     }
     // Remove 0x000000000000000000000000000000000000dEaD from results
     owners.remove("0x000000000000000000000000000000000000dead");
+    owners.remove("0x000000000000000000000000000000000000dEaD");
 
     // Filter out the addresses with zero balances and collect the owners
     let owner_addresses: Vec<String> = owners

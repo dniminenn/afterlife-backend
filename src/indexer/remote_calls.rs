@@ -274,7 +274,7 @@ impl<'a> EventFetcher<'a> {
         Ok(Event::new(
             contract.clone(),
             format!("{:?}", from_address),
-            format!("{:?}", to_address),
+            format!("{:?}", from_address),
             format!("{:?}", to_address),
             ids,
             values,
