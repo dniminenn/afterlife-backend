@@ -224,7 +224,7 @@ async fn handle_get_token_owners(
 }
 
 async fn handle_get_username_by_wallet(body: HashMap<String, String>) -> Result<impl warp::Reply, Rejection> {
-    println!("Handling get username by wallet, body: {:?}", body);
+    //println!("Handling get username by wallet, body: {:?}", body);
     let wallet_address = match body.get("address") {
         Some(address) => address,
         None => return Err(warp::reject::custom(CustomReject("Address not provided".to_string()))),

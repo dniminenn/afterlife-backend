@@ -111,7 +111,7 @@ pub async fn get_entire_collection(
     chain_name: &str,
     contract_address: &str,
 ) -> Result<Vec<u64>, Box<dyn std::error::Error + Send>> {
-    println!("Get entire collection for {} on {}", contract_address.to_lowercase(), chain_name);
+    //println!("Get entire collection for {} on {}", contract_address.to_lowercase(), chain_name);
     let rows = client
         .query(
             r#"
