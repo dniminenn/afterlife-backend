@@ -5,7 +5,7 @@ use std::collections::{HashMap};
 use std::result::Result;
 use tokio_postgres::{Client, Error, GenericClient};
 extern crate primitive_types;
-
+use eth_checksum::checksum;
 use web3::types::U256;
 
 /* DB SCHEMA
@@ -80,30 +80,13 @@ impl Event {
         })
     }
     // Convert string containing JSON list of integers to Vec<u64>
-    pub fn from_json(
-        contract: Contract,
-        operator: String,
-        from_address: String,
-        to_address: String,
-        ids: String,
-        values: String,
-        block_number: u64,
-        transaction_hash: String,
-    ) -> Result<Self, &'static str> {
-        let ids: Vec<U256> = serde_json::from_str(&ids).unwrap_or_else(|_| Vec::new());
-        let values: Vec<U256> = serde_json::from_str(&values).unwrap_or_else(|_| Vec::new());
+}
 
-        Event::new(
-            contract,
-            operator,
-            from_address,
-            to_address,
-            ids,
-            values,
-            block_number,
-            transaction_hash,
-        )
-    }
+fn u256_vec_to_json_decimal(vec: &Vec<U256>) -> Result<String, serde_json::Error> {
+    let decimal_strings: Vec<String> = vec.iter().map(|u| u.to_string()).collect();
+    let string = serde_json::to_string(&decimal_strings);
+    let stripped = string.unwrap().replace("\"", "");
+    Ok(stripped)
 }
 
 pub async fn get_last_processed_block(contract: &Contract, client: &Client) -> Result<i32, Error> {
@@ -193,7 +176,6 @@ pub async fn nuke_and_process_events_for_chain(
         let contract_id = contract_and_chain_to_contractid(contract, chain, &transaction).await?;
 
         if let Some(new_events) = new_events_by_contract.get(&contract_id) {
-            // Delete old events between from_block and to_block
             transaction
                 .execute(
                     "DELETE FROM events WHERE contract_id = $1 AND block_number >= $2 AND block_number <= $3",
@@ -201,31 +183,33 @@ pub async fn nuke_and_process_events_for_chain(
                 )
                 .await?;
 
-            // Add new events within the transaction context
             for event in new_events {
-                let ids_as_json = serde_json::to_string(&event.ids)?;
-                let values_as_json = serde_json::to_string(&event.values)?;
+                let ids_as_json = u256_vec_to_json_decimal(&event.ids)?;
+                let values_as_json = u256_vec_to_json_decimal(&event.values)?;
+                let operator_address = checksum(&event.operator);
+                let from_address = checksum(&event.from_address);
+                let to_address = checksum(&event.to_address);
+                let transaction_hash = &event.transaction_hash;
 
                 transaction
                     .execute(
                         "INSERT INTO events (contract_id, operator, from_address, to_address, ids, values, block_number, transaction_hash) \
-                        VALUES ($1, LOWER($2), LOWER($3), LOWER($4), $5, $6, $7, LOWER($8))",
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                         &[
                             &contract_id,
-                            &event.operator,
-                            &event.from_address,
-                            &event.to_address,
+                            &operator_address,
+                            &from_address,
+                            &to_address,
                             &ids_as_json,
                             &values_as_json,
                             &(event.block_number as i32),
-                            &event.transaction_hash,
+                            &transaction_hash,
                         ],
                     )
                     .await?;
             }
         }
 
-        // Update last processed block within the transaction context
         transaction
             .execute(
                 "UPDATE contracts SET last_processed_block = $1 WHERE id = $2",
@@ -234,7 +218,6 @@ pub async fn nuke_and_process_events_for_chain(
             .await?;
     }
 
-    // Commit all changes if successful
     transaction.commit().await?;
 
     Ok(())

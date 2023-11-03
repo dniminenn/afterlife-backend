@@ -7,32 +7,7 @@ use tokio::io;
 use std::{env, fs};
 
 pub async fn read_file(path: &Path) -> io::Result<String> {
-    let file_name_lowercase = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "File name not found"))?
-        .to_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid file name"))?
-        .to_lowercase();
-
-    let directory = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "Directory for the file not found")
-    })?;
-
-    let dir_entries = fs::read_dir(directory)?;
-
-    let case_insensitive_path = dir_entries
-        .filter_map(|entry| entry.ok())
-        .find(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .map(|s| s.to_lowercase() == file_name_lowercase)
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "File not found"))?
-        .path();
-
-    let file = File::open(case_insensitive_path).await?;
+    let file = File::open(path).await?;
     let mut buf_reader = BufReader::new(file);
     let mut contents = String::new();
     buf_reader.read_to_string(&mut contents).await?;

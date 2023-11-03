@@ -143,7 +143,7 @@ impl<'a> EventFetcher<'a> {
         let current_chunk = Arc::new(AtomicUsize::new(0));
         let total_chunks = chunks.len() as f64; // Cast to f64 for floating-point division
 
-        let semaphore = Arc::new(Semaphore::new(40)); // limit to 2 concurrent tasks
+        let semaphore = Arc::new(Semaphore::new(80)); // limit to 2 concurrent tasks
 
         let mut tasks = FuturesUnordered::new();
 

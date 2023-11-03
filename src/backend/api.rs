@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio_postgres::Client;
 use warp::reject::{Reject, Rejection};
 use warp::Filter;
+use eth_checksum::checksum;
 
 #[derive(Debug)]
 struct CustomReject(String);
@@ -154,13 +155,13 @@ async fn handle_get_collection_for_address(
         .map_err(|e| format!("Failed to get collection: {}", e))
     {
         Ok(balances) => {
-            let rarity_path = format!("{}/{}_{}_rarity.json", path_rarities, chain_name, contract_address);
+            let rarity_path = format!("{}/{}_{}_rarity.json", path_rarities, chain_name, checksum(contract_address.as_str()));
             let rarity_data = read_file(Path::new(&rarity_path)).await;
             let rarity_map = build_rarity_map(rarity_data);
 
             let mut tokens: HashMap<u64, Value> = HashMap::new();
             for (token_id, balance) in balances {
-                let metadata_path = format!("{}/{}/{}/{}.json", path_metadata, chain_name, contract_address, token_id);
+                let metadata_path = format!("{}/{}/{}/{}.json", path_metadata, chain_name, checksum(contract_address.as_str()), token_id);
                 let metadata = read_file(Path::new(&metadata_path)).await;
                 if let Some((token_id, mut token_details)) = build_token_details(token_id, metadata, &rarity_map) {
                     token_details["balance"] = json!(balance);
@@ -189,12 +190,12 @@ async fn handle_get_entire_collection(
         .map_err(|e| format!("Failed to get entire collection: {}", e))
     {
         Ok(token_ids) => {
-            let rarity_path = format!("{}/{}_{}_rarity.json", path_rarities, chain_name, contract_address);
+            let rarity_path = format!("{}/{}_{}_rarity.json", path_rarities, chain_name, checksum(contract_address.as_str()));
             let rarity_data = fs::read_to_string(&rarity_path).unwrap_or_else(|_| String::new());
             let rarity_map = build_rarity_map(Ok(rarity_data));
 
             let tokens: HashMap<u64, Value> = token_ids.into_iter().filter_map(|token_id| {
-                let metadata_path = format!("{}/{}/{}/{}.json", path_metadata, chain_name, contract_address, token_id);
+                let metadata_path = format!("{}/{}/{}/{}.json", path_metadata, chain_name, checksum(contract_address.as_str()), token_id);
                 let metadata = fs::read_to_string(&metadata_path);
                 build_token_details(token_id, metadata, &rarity_map)
             }).collect();
