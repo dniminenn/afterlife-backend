@@ -18,6 +18,7 @@ async fn main() {
     let update_period = Duration::from_secs(60); // 30 seconds
     let mut interval = time::interval(update_period);
 
+    // Spawn the update task
     tokio::spawn(async move {
         loop {
             interval.tick().await;

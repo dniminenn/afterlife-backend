@@ -33,6 +33,9 @@ type CollectionsType = HashMap<String, HashMap<String, HashMap<String, HashMap<u
 type LeaderboardType = HashMap<String, f64>;
 static ALL_USERS_LEADERBOARD_CACHE: Lazy<Mutex<Option<LeaderboardType>>> = Lazy::new(|| Mutex::new(None));
 
+// define const of excluded users or addresses for the leaderboard
+const EXCLUDED_USERS: [&str; 4] = ["Danetron3030", "AfterlifeTreasury", "0x3cc35873a61D925Ac46984f8C4F85d8fa6A892eF", "AfterlifeCoinBank"];
+
 pub async fn run_server(client: Arc<Client>) {
     //let client = Arc::new(client);
 
@@ -386,8 +389,6 @@ pub async fn get_or_update_all_users_collections(
             ))),
         };
 
-        let mut leaderboard: LeaderboardType = HashMap::new();
-
         let mut tasks = Vec::new();
 
         for (user_address, user_collection) in all_users_collections {
@@ -398,9 +399,13 @@ pub async fn get_or_update_all_users_collections(
                 let username_or_addr = get_username_or_checksummed_address(&user_address).await
                     .unwrap_or(Some(user_address.clone())).unwrap_or_default();
 
+                // check if user is in const EXCLUDED_USERS
+                if EXCLUDED_USERS.contains(&username_or_addr.as_str()) {
+                    return Ok::<_, Rejection>((username_or_addr, 0.0));
+                }
+
                 let mut total_rarity_score: f64 = 0.0;
 
-                // You could potentially parallelize this loop as well.
                 for (chain, contracts) in user_collection {
                     for (contract_address, tokens) in contracts {
                         let rarity_path = format!(
@@ -437,7 +442,7 @@ pub async fn get_or_update_all_users_collections(
         for task_result in results {
             match task_result {
                 Ok((address, score)) => {
-                    leaderboard.insert(address, score);
+                    if score > 0.0 { leaderboard.insert(address, score); }
                 },
                 Err(e) => {
                     return Err(e);
@@ -445,7 +450,6 @@ pub async fn get_or_update_all_users_collections(
             }
         }
 
-        *cache = Some(leaderboard.clone());
         *cache = Some(leaderboard.clone());
 
     }
