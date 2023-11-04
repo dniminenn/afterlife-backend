@@ -17,7 +17,9 @@ use tokio::sync::Mutex;
 use tokio::task;
 use tokio_postgres::Client;
 use warp::reject::{Reject, Rejection};
-use warp::{Filter, Reply};
+use warp::http::header::{HeaderValue, CACHE_CONTROL};
+use warp::{Filter, Reply, http::Response};
+use warp::reply::with_header;
 
 #[derive(Debug)]
 struct CustomReject(String);
@@ -72,8 +74,8 @@ pub async fn run_server(client: Arc<Client>) {
             .and(warp::get())
             .and(with_db(client.clone()))
             .and_then(handler_leaderboard))
-        .map(|reply| warp::reply::with_header(reply, "Access-Control-Allow-Origin", "*"))
-        .with(cors);
+        .with(cors)
+        .with(warp::reply::with::header("Cache-Control", "public, max-age=60"));
 
     warp::serve(routes.recover(handle_custom_rejection))
         .run(([127, 0, 0, 1], 3030))
