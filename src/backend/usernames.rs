@@ -24,7 +24,7 @@ pub async fn get_username_or_checksummed_address(
         .or_else(|| Some(checksum(&address_str))))
 }
 
-pub async fn get_addresses_for_username(username: &str) -> HashSet<String> {
+pub async fn get_all_addresses_for_username(username: &str) -> HashSet<String> {
     let users_data = load_users_data().await;
     let mut found_addresses = HashSet::new();
     // check if username is a valid address
@@ -50,4 +50,28 @@ pub async fn get_addresses_for_username(username: &str) -> HashSet<String> {
     }
     // return the addresses, if any, if not, it will be an empty HashSet
     found_addresses
+}
+
+pub fn points_to_level(rarity_score: i32) -> i32 {
+    // Constants
+    let a: f64 = 100.0;
+    let r: f64 = 1.0625;
+
+    // Level 0 if rarity_score is 0
+    if rarity_score == 0 {
+        return 0;
+    }
+
+    // Start from level 1 and iterate
+    let mut level = 1;
+    while level <= 60 {
+        let cumulative_xp = a * (r.powi(level - 1) - 1.0) / (r - 1.0);
+        if (rarity_score as f64) < cumulative_xp {
+            return level - 1;
+        }
+        level += 1;
+    }
+
+    // If we reach here, return the max level (60)
+    60
 }

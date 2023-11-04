@@ -1,6 +1,6 @@
 use crate::backend;
-use crate::backend::queries::{get_all_users_collections, get_user_full_collection};
-use crate::backend::usernames::get_username_or_checksummed_address;
+use crate::backend::queries::{get_all_users_collections, get_user_full_collection, get_contract_name_from_chain_and_address};
+use crate::backend::usernames::{get_all_addresses_for_username, get_username_or_checksummed_address};
 use crate::common;
 use backend::queries;
 use common::file_loader::{read_file};
@@ -66,10 +66,10 @@ pub async fn run_server(client: Arc<Client>) {
             .and(warp::get())
             .and(with_db(client.clone()))
             .and_then(handle_get_user_full_collection))
-        .or(warp::path!("rarity-score" / String)
+        .or(warp::path!("user" / "level" / String)
             .and(warp::get())
             .and(with_db(client.clone()))
-            .and_then(handle_get_user_rarity_score))
+            .and_then(handle_get_user_details))
         .or(warp::path!("leaderboard")
             .and(warp::get())
             .and(with_db(client.clone()))
@@ -315,45 +315,92 @@ async fn handle_get_user_full_collection(
     }
 }
 
-async fn handle_get_user_rarity_score(
-    user_address: String,
+async fn handle_get_user_details(
+    username: String,
     client: Arc<Client>,
 ) -> Result<impl warp::Reply, Rejection> {
-    let user_collection = match get_user_full_collection(&*client, &user_address).await {
-        Ok(collection) => collection,
-        Err(_) => {
-            return Err(warp::reject::custom(CustomReject(
-                "Failed to fetch user's full collection".to_string(),
-            )))
-        }
-    };
-
-    let path_rarities = env::var("AFTERLIFE_PATH_RARITIES").unwrap();
+    let user_addresses = get_all_addresses_for_username(&username).await;
     let mut total_rarity_score: f64 = 0.0;
+    let mut collection_scores = HashMap::new();
+    let mut all_nfts: HashMap<String, HashMap<String, Vec<_>>> = HashMap::new();
+    let mut top_nfts = Vec::new();
 
-    for (chain, contracts) in user_collection {
-        for (contract_address, tokens) in contracts {
-            let rarity_path = format!(
-                "{}/{}_{}_rarity.json",
-                path_rarities,
-                chain,
-                checksum(contract_address.as_str())
-            );
+    let path_rarities = env::var("AFTERLIFE_PATH_RARITIES")
+        .map_err(|_| warp::reject::custom(CustomReject("Environment variable AFTERLIFE_PATH_RARITIES not set".to_string())))?;
+    let path_metadata = env::var("AFTERLIFE_PATH_METADATA").unwrap();
 
-            let rarity_data = read_file(Path::new(&rarity_path)).await;
-            let rarity_map = build_rarity_map(rarity_data);
+    for user_address in &user_addresses {
+        let user_collection = get_user_full_collection(&*client, user_address).await
+            .map_err(|_| warp::reject::custom(CustomReject("Failed to fetch user's full collection".to_string())))?;
 
-            for (token_id, balance) in tokens {
-                if let Some((rarity_score, _)) = rarity_map.get(&token_id) {
-                    // Multiply the rarity score by the balance as the user might have multiple of the same token.
-                    total_rarity_score += rarity_score * balance as f64;
+        for (chain, contracts) in user_collection {
+            for (contract_address, tokens) in contracts {
+                let contract_name = get_contract_name_from_chain_and_address(&*client, &chain, &contract_address).await
+                    .map_err(|_| warp::reject::custom(CustomReject("Failed to fetch contract name".to_string())))?;
+                let rarity_path = format!("{}/{}_{}_rarity.json", path_rarities, chain, checksum(contract_address.as_str()));
+                let rarity_data = read_file(Path::new(&rarity_path)).await;
+                let rarity_map = build_rarity_map(rarity_data);
+                let collection_name = format!("{}_{}", chain, contract_name);
+
+                for (token_id, balance) in tokens {
+                    if let Some((rarity_score, _)) = rarity_map.get(&token_id) {
+                        let metadata_path = format!("{}/{}/{}/{}.json", path_metadata, chain, checksum(contract_address.as_str()), token_id);
+                        let metadata = read_file(Path::new(&metadata_path)).await;
+                        let token_details = build_token_details(token_id, metadata, &rarity_map);
+                        let mut token_name = "".to_string();
+                        if let Some((_, token_details)) = token_details {
+                            token_name = token_details["name"].as_str().unwrap_or("").to_string();
+                        }
+                        let score = rarity_score * balance as f64;
+                        total_rarity_score += score;
+                        *collection_scores.entry(collection_name.clone()).or_insert(0.0) += score;
+                        top_nfts.push((rarity_score.clone(), token_id, contract_address.clone(), chain.clone(), token_name.clone()));
+                        let chain_map = all_nfts.entry(chain.clone()).or_default();
+                        let contract_tokens = chain_map.entry(contract_address.clone()).or_default();
+
+                        contract_tokens.push(json!({
+                        "rarity_score": (rarity_score * 1000.0).round(),
+                        "score": (rarity_score * 1000.0 * (balance as f64)).round(),
+                        "token_id": token_id,
+                        "balance": balance,
+                        "token_name": token_name,
+                        }));
+                    }
                 }
             }
         }
     }
-    // Multiply by 1000 and round to nearest integer
+
+    // Sort by score in descending order and take the top 10 NFTs
+    top_nfts.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let top_nfts: Vec<_> = top_nfts.clone().into_iter().take(10).collect();
+
+    // Process other data as before
     total_rarity_score = (total_rarity_score * 1000.0).round();
-    Ok(warp::reply::json(&json!({ "total_rarity_score": total_rarity_score })).into_response())
+    let addresses: Vec<String> = user_addresses.into_iter().collect();
+    let mut collections: Vec<_> = collection_scores.into_iter()
+        .map(|(k, v)| (k, (v * 1000.0).round()))
+        .collect();
+    collections.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Construct final JSON response including top NFTs
+    let response = json!({
+        "username": username,
+        "addresses": addresses,
+        "afterlifepoints": total_rarity_score,
+        "level": backend::usernames::points_to_level(total_rarity_score as i32),
+        "collection_scores": collections.into_iter().collect::<HashMap<_, _>>(),
+        "all_nfts": all_nfts,
+        "top_nfts": top_nfts.into_iter().map(|(rarity_score, token_id, contract_address, chain, name)| json!({
+            "rarity_score": (rarity_score * 1000.0).round(), // round to nearest integer
+            "token_id": token_id,
+            "contract_address": contract_address,
+            "chain": chain,
+            "token_name": name,
+        })).collect::<Vec<_>>(),
+    });
+
+    Ok(warp::reply::json(&response).into_response())
 }
 
 async fn handler_leaderboard(client: Arc<Client>) -> Result<impl Reply, Rejection> {

@@ -411,3 +411,26 @@ pub async fn get_all_users_collections(
 
     Ok(all_users_collections)
 }
+
+pub async fn get_contract_name_from_chain_and_address(
+    client: &tokio_postgres::Client,
+    chain_name: &str,
+    contract_address: &str,
+) -> Result<String, Box<dyn std::error::Error + Send>> {
+    let rows = client
+        .query(
+            r#"
+            SELECT c.name
+            FROM contracts c
+            JOIN chains ch ON c.chain_id = ch.id
+            WHERE LOWER(c.address) = $1 AND LOWER(ch.name) = $2
+            "#,
+            &[&contract_address.to_lowercase(), &chain_name.to_lowercase()],
+        )
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
+
+    let row = rows.get(0);
+    // return the name or "Unknown"
+    Ok(row.map(|r| r.get("name")).unwrap_or("Unknown".to_string()))
+}
