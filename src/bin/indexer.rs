@@ -75,12 +75,7 @@ async fn main() {
 
         // Process all events
         for (chain_name, (from_block, to_block)) in all_blocks_by_chain.iter() {
-            // how many events?
-            let event_count = all_events_by_contract.iter().map(|(_, events)| events.len()).sum::<usize>();
-            //println!("Processing {} events for chain {} from block {} to block {}", event_count, chain_name, from_block, to_block);
             let chain = config.chains.iter().find(|c| &c.name == chain_name).unwrap();
-            //println!("Processing events for chain {} from block {} to block {}", chain_name, from_block, to_block);
-            //println!("All events: {:?}", all_events_by_contract);
             nuke_and_process_events_for_chain(chain, &all_events_by_contract, *from_block, *to_block, &mut db_client)
                 .await
                 .expect("Failed to nuke and process events");
@@ -93,9 +88,9 @@ async fn main() {
         for chain in &config.chains {
             total_contracts += chain.contracts.len();
         }
-        println!("Indexed {} contracts on {} chains in {:?}", total_contracts, config.chains.len(), elapsed);
- //       if elapsed < Duration::from_secs(60) {
-//            tokio::time::sleep(Duration::from_secs(60) - elapsed).await;
-//        }
+        //println!("Indexed {} contracts on {} chains in {:?}", total_contracts, config.chains.len(), elapsed);
+        if elapsed < Duration::from_secs(60) {
+            tokio::time::sleep(Duration::from_secs(1) - elapsed).await;
+        }
     }
 }

@@ -16,7 +16,7 @@ use web3::transports::Http;
 use web3::types::{BlockNumber, FilterBuilder, Log, H160, H256, U256};
 use web3::Web3;
 
-const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(10);
+const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
 const MAX_RETRY_COUNT: usize = 5;
 
 const TRANSFER_TOPIC: H256 = H256([
@@ -115,9 +115,6 @@ impl<'a> EventFetcher<'a> {
             self.last_processed_block
         };
 
-        //println!("Look back start block: {}", look_back_start_block);
-        //println!("Last processed: {}", self.last_processed_block);
-        //println!("Current block: {}", current_block);
 
         let start_block = std::cmp::max(
             look_back_start_block,
@@ -352,7 +349,7 @@ impl<'a> EventFetcher<'a> {
 
         loop {
             match self.web3.eth().block_number().await {
-                Ok(block_number) => return Ok(usize::try_from(block_number).unwrap()),
+                Ok(block_number) => return Ok(usize::try_from(block_number).unwrap() - 2), // subtract 2 to account for block propagation delay
                 Err(e) => {
                     if attempts >= MAX_RETRY_COUNT {
                         return Err(e.into());
