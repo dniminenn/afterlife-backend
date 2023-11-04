@@ -6,6 +6,7 @@ use tokio::time::{self, Duration};
 
 #[tokio::main]
 async fn main() {
+    println!("Starting Afterlife API, Insanity Edition");
     dotenv().ok();
     let api_db_client = database::connect().await.expect("Failed to connect to API database");
     let cache_db_client = database::connect().await.expect("Failed to connect to Cache database");
