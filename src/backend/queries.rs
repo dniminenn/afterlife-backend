@@ -8,7 +8,6 @@ use web3::types::U256;
 const DEAD_ADDRESS: &str = "0x000000000000000000000000000000000000dEaD";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
-
 #[derive(Debug)]
 pub struct Event {
     pub from_address: Option<String>,
@@ -42,7 +41,11 @@ pub async fn get_entire_collection_for_address(
             WHERE LOWER(c.address) = $1 AND LOWER(ch.name) = $2 AND
             (LOWER(e.from_address) = $3 OR LOWER(e.to_address) = $3)
             "#,
-            &[&contract_address.to_lowercase(), &chain_name.to_lowercase(), &wallet_address_lowercase],
+            &[
+                &contract_address.to_lowercase(),
+                &chain_name.to_lowercase(),
+                &wallet_address_lowercase,
+            ],
         )
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
@@ -89,7 +92,7 @@ pub async fn get_entire_collection_for_address(
     }
 
     // Remove any items that have a zero balance
-    balances.retain(|_, &mut value | value > 0);
+    balances.retain(|_, &mut value| value > 0);
 
     //println!("Found {} balances for {} on {}", balances.len(), wallet_address, contract_address);
 
@@ -236,7 +239,8 @@ pub async fn get_token_owners(
 pub async fn get_user_full_collection(
     client: &tokio_postgres::Client,
     wallet_address: &str,
-) -> Result<HashMap<String, HashMap<String, HashMap<u64, i64>>>, Box<dyn std::error::Error + Send>> {
+) -> Result<HashMap<String, HashMap<String, HashMap<u64, i64>>>, Box<dyn std::error::Error + Send>>
+{
     let wallet_address_lowercase = wallet_address.to_lowercase();
     let rows = client
         .query(
@@ -268,7 +272,10 @@ pub async fn get_user_full_collection(
         let to_address: String = row.get("to_address");
 
         // This closure will determine how to adjust the balance based on the event's 'from' and 'to' addresses
-        let adjust_balance = |current_balance: &mut i64, id_value: i64, event_from_address: &str, event_to_address: &str| {
+        let adjust_balance = |current_balance: &mut i64,
+                              id_value: i64,
+                              event_from_address: &str,
+                              event_to_address: &str| {
             if event_to_address.to_lowercase() == wallet_address_lowercase {
                 *current_balance += id_value;
             }
@@ -286,7 +293,12 @@ pub async fn get_user_full_collection(
 
         // Adjust balances based on the event data
         for (&id, &value) in ids.iter().zip(values.iter()) {
-            adjust_balance(contract_balances.entry(id).or_insert(0), value, &from_address, &to_address);
+            adjust_balance(
+                contract_balances.entry(id).or_insert(0),
+                value,
+                &from_address,
+                &to_address,
+            );
         }
     }
 
@@ -310,104 +322,88 @@ pub async fn get_user_full_collection(
 
 pub async fn get_all_users_collections(
     client: &tokio_postgres::Client,
-) -> Result<HashMap<String, HashMap<String, HashMap<String, HashMap<u64, i64>>>>, Box<dyn std::error::Error + Send>> {
-    let mut all_users_collections: HashMap<String, HashMap<String, HashMap<String, HashMap<u64, i64>>>> = HashMap::new();
+) -> Result<
+    HashMap<String, HashMap<String, HashMap<String, HashMap<u64, i64>>>>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let mut all_users_collections: HashMap<
+        String,
+        HashMap<String, HashMap<String, HashMap<u64, i64>>>,
+    > = HashMap::new();
 
-    // Retrieve all unique user addresses
-    let user_addresses = client
-        .query(
-            r#"
-            SELECT DISTINCT LOWER(e.from_address) as user_address FROM events e
-            UNION
-            SELECT DISTINCT LOWER(e.to_address) FROM events e
-            "#,
-            &[],
-        )
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
+    let query = r#"
+        SELECT
+            e.to_address AS to_address,
+            e.from_address AS from_address,
+            ch.name AS chain_name,
+            c.address AS contract_address,
+            e.ids AS ids,
+            e.values AS values
+        FROM events e
+        INNER JOIN contracts c ON e.contract_id = c.id
+        INNER JOIN chains ch ON c.chain_id = ch.id;
+    "#;
 
-    // Remove zero address and dead address
-    // Define a list of addresses to exclude
-    let excluded_addresses: HashSet<String> = vec![
-        "0x0000000000000000000000000000000000000000",
-        "0x000000000000000000000000000000000000dead",
-        // ...
-    ].into_iter().map(|a| a.to_lowercase()).collect();
+    //eprintln!("Running query: {}", query);
 
-    for row in user_addresses {
+    let rows = client.query(query, &[]).await?;
 
-        let user_address: String = row.get("user_address");
+    //eprintln!("Found {} events", rows.len());
 
-        if excluded_addresses.contains(&user_address) {
-            continue;
-        }
+    for row in rows {
+        let to_address: String = row.get("to_address");
+        let from_address: String = row.get("from_address");
+        let ids: Vec<u64> = serde_json::from_str(row.get::<_, &str>("ids"))?;
+        let values: Vec<i64> = serde_json::from_str::<Vec<u64>>(row.get::<_, &str>("values"))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v as i64)
+            .collect();
 
-        let rows = client
-            .query(
-                r#"
-                SELECT ch.name as chain_name, c.address as contract_address, e.from_address, e.to_address, e.ids, e.values
-                FROM events e
-                INNER JOIN contracts c ON e.contract_id = c.id
-                INNER JOIN chains ch ON c.chain_id = ch.id
-                WHERE LOWER(e.from_address) = $1 OR LOWER(e.to_address) = $1
-                "#,
-                &[&user_address],
-            )
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
+        let chain_name: String = row.get("chain_name");
+        let contract_address: String = row.get("contract_address");
 
-        let mut collection: HashMap<String, HashMap<String, HashMap<u64, i64>>> = HashMap::new();
-
-        for row in rows {
-            let chain_name: String = row.get("chain_name");
-            let contract_address: String = row.get("contract_address");
-            let ids: Vec<u64> = serde_json::from_str(row.get::<_, &str>("ids")).unwrap_or_default();
-            let values: Vec<i64> = serde_json::from_str::<Vec<u64>>(row.get::<_, &str>("values"))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|v| v as i64)
-                .collect();
-
-            let from_address: String = row.get("from_address");
-            let to_address: String = row.get("to_address");
-
-            let adjust_balance = |current_balance: &mut i64, id_value: i64, event_from_address: &str, event_to_address: &str| {
-                if event_to_address.to_lowercase() == user_address {
-                    *current_balance += id_value;
-                }
-                if event_from_address.to_lowercase() == user_address {
-                    *current_balance -= id_value;
-                }
-            };
-
-            let contract_balances = collection
-                .entry(chain_name)
-                .or_insert_with(HashMap::new)
-                .entry(contract_address)
-                .or_insert_with(HashMap::new);
-
-            for (&id, &value) in ids.iter().zip(values.iter()) {
-                adjust_balance(contract_balances.entry(id).or_insert(0), value, &from_address, &to_address);
+        // Using a single loop to update both to and from addresses
+        for (&id, &value) in ids.iter().zip(values.iter()) {
+            if !to_address.is_empty() {
+                let balance = all_users_collections
+                    .entry(to_address.clone())
+                    .or_default()
+                    .entry(chain_name.clone())
+                    .or_default()
+                    .entry(contract_address.clone())
+                    .or_default()
+                    .entry(id)
+                    .or_insert(0);
+                *balance += value;
             }
-        }
 
-
-        for chain_balances in collection.values_mut() {
-            for contract_balances in chain_balances.values_mut() {
-                contract_balances.retain(|_, &mut v| v != 0);
+            if !from_address.is_empty() {
+                let balance = all_users_collections
+                    .entry(from_address.clone())
+                    .or_default()
+                    .entry(chain_name.clone())
+                    .or_default()
+                    .entry(contract_address.clone())
+                    .or_default()
+                    .entry(id)
+                    .or_insert(0);
+                *balance -= value;
             }
-        }
-
-        for chain_balances in collection.values_mut() {
-            chain_balances.retain(|_, v| !v.is_empty());
-        }
-
-        collection.retain(|_, v| !v.is_empty());
-
-        if !collection.is_empty() {
-            all_users_collections.insert(user_address, collection);
         }
     }
+
+    // Cleaning up data similar to the first function
+    all_users_collections.retain(|_, chains| {
+        chains.retain(|_, contracts| {
+            contracts.retain(|_, balances| {
+                balances.retain(|_, &mut v| v != 0);
+                !balances.is_empty()
+            });
+            !contracts.is_empty()
+        });
+        !chains.is_empty()
+    });
 
     Ok(all_users_collections)
 }

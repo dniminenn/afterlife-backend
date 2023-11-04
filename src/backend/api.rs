@@ -17,9 +17,7 @@ use tokio::sync::Mutex;
 use tokio::task;
 use tokio_postgres::Client;
 use warp::reject::{Reject, Rejection};
-use warp::http::header::{HeaderValue, CACHE_CONTROL};
-use warp::{Filter, Reply, http::Response};
-use warp::reply::with_header;
+use warp::{Filter, Reply};
 
 #[derive(Debug)]
 struct CustomReject(String);
@@ -37,6 +35,8 @@ static ALL_USERS_LEADERBOARD_CACHE: Lazy<Mutex<Option<LeaderboardType>>> = Lazy:
 
 // define const of excluded users or addresses for the leaderboard
 const EXCLUDED_USERS: [&str; 4] = ["Danetron3030", "AfterlifeTreasury", "0x3cc35873a61D925Ac46984f8C4F85d8fa6A892eF", "AfterlifeCoinBank"];
+const DEAD_ADDRESS: &str = "0x000000000000000000000000000000000000dEaD";
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 pub async fn run_server(client: Arc<Client>) {
     //let client = Arc::new(client);
@@ -74,6 +74,10 @@ pub async fn run_server(client: Arc<Client>) {
             .and(warp::get())
             .and(with_db(client.clone()))
             .and_then(handler_leaderboard))
+        .or(warp::path!("full")
+            .and(warp::get())
+            .and(with_db(client.clone()))
+            .and_then(handle_get_all_afterlife_collections))
         .with(cors)
         .with(warp::reply::with::header("Cache-Control", "public, max-age=60"));
 
@@ -426,11 +430,9 @@ pub async fn get_or_update_all_users_collections(
 ) -> Result<LeaderboardType, Rejection> {
     let mut cache = ALL_USERS_LEADERBOARD_CACHE.lock().await;
 
-    // If the cache is not populated or a forced update is needed, compute the leaderboard.
     if cache.is_none() || force_update {
         let path_rarities =
             env::var("AFTERLIFE_PATH_RARITIES").expect("Expected AFTERLIFE_PATH_RARITIES to be set");
-        // Fetch new data because either cache is empty or we're forcing an update.
         let all_users_collections = match get_all_users_collections(client).await {
             Ok(collections) => collections,
             Err(_) => return Err(warp::reject::custom(CustomReject(
@@ -448,7 +450,6 @@ pub async fn get_or_update_all_users_collections(
                 let username_or_addr = get_username_or_checksummed_address(&user_address).await
                     .unwrap_or(Some(user_address.clone())).unwrap_or_default();
 
-                // check if user is in const EXCLUDED_USERS
                 if EXCLUDED_USERS.contains(&username_or_addr.as_str()) {
                     return Ok::<_, Rejection>((username_or_addr, 0.0));
                 }
@@ -475,7 +476,6 @@ pub async fn get_or_update_all_users_collections(
                     }
                 }
 
-                // Multiply by 1000 and round to nearest integer as per your original logic.
                 total_rarity_score = (total_rarity_score * 1000.0).round();
 
                 Ok::<_, Rejection>((username_or_addr, total_rarity_score))
@@ -488,10 +488,14 @@ pub async fn get_or_update_all_users_collections(
         let results = try_join_all(tasks).await.map_err(|e| {
             warp::reject::custom(CustomReject(format!("Task join error: {}", e)))
         })?;
+
         for task_result in results {
             match task_result {
-                Ok((address, score)) => {
-                    if score > 0.0 { leaderboard.insert(address, score); }
+                Ok((username_or_addr, score)) => {
+                    leaderboard
+                        .entry(username_or_addr)
+                        .and_modify(|e| *e += score) // Add to the existing score.
+                        .or_insert(score); // Insert if it does not exist.
                 },
                 Err(e) => {
                     return Err(e);
@@ -499,12 +503,28 @@ pub async fn get_or_update_all_users_collections(
             }
         }
 
-        *cache = Some(leaderboard.clone());
+        let filtered_leaderboard = leaderboard.into_iter()
+            .filter(|(username_or_addr, score)| {
+                *score > 0.0 &&
+                    !EXCLUDED_USERS.iter().any(|&excluded| excluded.eq_ignore_ascii_case(username_or_addr)) &&
+                    !username_or_addr.eq_ignore_ascii_case(ZERO_ADDRESS) &&
+                    !username_or_addr.eq_ignore_ascii_case(DEAD_ADDRESS)
+            })
+            .collect::<LeaderboardType>();
 
+        *cache = Some(filtered_leaderboard);
     }
 
-    // The cache is either freshly populated or was already available.
     cache.clone().ok_or_else(|| warp::reject::custom(CustomReject(
         "Leaderboard cache is not available".to_string(),
     )))
+}
+
+pub async fn handle_get_all_afterlife_collections(
+    client: Arc<Client>,
+) -> Result<impl warp::Reply, Rejection> {
+    let all_users_collections = get_all_users_collections(&client).await
+        .map_err(|_| warp::reject::custom(CustomReject("Failed to fetch collections for all users".to_string())))?;
+
+    Ok(warp::reply::json(&all_users_collections).into_response())
 }
