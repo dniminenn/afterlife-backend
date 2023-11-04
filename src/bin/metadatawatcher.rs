@@ -148,7 +148,7 @@ fn are_scripts_running() -> Result<bool, Box<dyn Error>> {
 
 fn launch_metadata_scripts() -> Result<(), Box<dyn Error>> {
     // Execute the scripts
-    /*let command_line = "\
+    let command_line = "\
         /home/jr/afterlife-awesome/venv/bin/python /home/jr/afterlife-awesome/metadatafetcher.py && \
         /home/jr/afterlife-awesome/venv/bin/python /home/jr/afterlife-awesome/cloudflarize.py && \
         /home/jr/afterlife-awesome/venv/bin/python /home/jr/afterlife-awesome/rarity_scorer.py";
@@ -162,7 +162,7 @@ fn launch_metadata_scripts() -> Result<(), Box<dyn Error>> {
             "Python scripts failed with exit status: {:?}",
             status.code()
         );
-    }*/
+    }
 
     Ok(())
 }
