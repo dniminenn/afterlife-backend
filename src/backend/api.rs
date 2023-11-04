@@ -3,7 +3,7 @@ use crate::backend::queries::{get_all_users_collections, get_user_full_collectio
 use crate::backend::usernames::get_username_or_checksummed_address;
 use crate::common;
 use backend::queries;
-use common::file_loader::{load_users_data, read_file};
+use common::file_loader::{read_file};
 use eth_checksum::checksum;
 use once_cell::sync::Lazy;
 use serde_json::{json, Map, Number, Value};
@@ -12,9 +12,10 @@ use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
 use std::{env, fs};
+use futures::future::try_join_all;
 use tokio::sync::Mutex;
+use tokio::task;
 use tokio_postgres::Client;
-use warp::http::Response;
 use warp::reject::{Reject, Rejection};
 use warp::{Filter, Reply};
 
@@ -29,8 +30,8 @@ struct ErrorResponse {
 }
 
 type CollectionsType = HashMap<String, HashMap<String, HashMap<String, HashMap<u64, i64>>>>;
-static ALL_USERS_COLLECTIONS_CACHE: Lazy<Mutex<Option<CollectionsType>>> =
-    Lazy::new(|| Mutex::new(None));
+type LeaderboardType = HashMap<String, f64>;
+static ALL_USERS_LEADERBOARD_CACHE: Lazy<Mutex<Option<LeaderboardType>>> = Lazy::new(|| Mutex::new(None));
 
 pub async fn run_server(client: Arc<Client>) {
     //let client = Arc::new(client);
@@ -351,48 +352,12 @@ async fn handle_get_user_rarity_score(
 }
 
 async fn handler_leaderboard(client: Arc<Client>) -> Result<impl Reply, Rejection> {
-    let all_users_collections = get_or_update_all_users_collections(&*client, false).await?;
+    // Retrieve the precomputed leaderboard from the cache.
+    let leaderboard = get_or_update_all_users_collections(&*client, false).await?;
 
-    let path_rarities =
-        env::var("AFTERLIFE_PATH_RARITIES").expect("Expected AFTERLIFE_PATH_RARITIES to be set");
-
-    let mut leaderboard: Vec<(String, f64)> = Vec::new();
-
-    let mut user_scores: HashMap<String, f64> = HashMap::new();
-
-    for (user_address, user_collection) in all_users_collections {
-        let username_or_addr = get_username_or_checksummed_address(&user_address).await.unwrap_or(Some(user_address.clone())).unwrap_or_default();
-
-        let mut total_rarity_score: f64 = 0.0;
-
-        for (chain, contracts) in user_collection {
-            for (contract_address, tokens) in contracts {
-                let rarity_path = format!(
-                    "{}/{}_{}_rarity.json",
-                    path_rarities,
-                    chain,
-                    checksum(contract_address.as_str())
-                );
-
-                let rarity_data = read_file(Path::new(&rarity_path)).await;
-                let rarity_map = build_rarity_map(rarity_data);
-
-                for (token_id, balance) in tokens {
-                    if let Some((rarity_score, _)) = rarity_map.get(&token_id) {
-                        total_rarity_score += rarity_score * balance as f64;
-                    }
-                }
-            }
-        }
-
-        total_rarity_score = (total_rarity_score * 1000.0).round();
-        let score = user_scores.entry(username_or_addr).or_insert(0.0);
-        *score += total_rarity_score;
-    }
-
-    // Convert scores to JSON
+    // Convert the leaderboard HashMap into a JSON value.
     let mut json_leaderboard = Map::new();
-    for (username_or_addr, score) in user_scores {
+    for (username_or_addr, score) in leaderboard {
         json_leaderboard.insert(
             username_or_addr,
             Value::Number(Number::from_f64(score).expect("Invalid score")),
@@ -406,23 +371,87 @@ async fn handler_leaderboard(client: Arc<Client>) -> Result<impl Reply, Rejectio
 pub async fn get_or_update_all_users_collections(
     client: &Client,
     force_update: bool,
-) -> Result<CollectionsType, Rejection> {
-    let mut cache = ALL_USERS_COLLECTIONS_CACHE.lock().await;
+) -> Result<LeaderboardType, Rejection> {
+    let mut cache = ALL_USERS_LEADERBOARD_CACHE.lock().await;
 
-    if !force_update {
-        if let Some(cached) = cache.as_ref() {
-            return Ok(cached.clone()); // Return cached value if present and no force update
+    // If the cache is not populated or a forced update is needed, compute the leaderboard.
+    if cache.is_none() || force_update {
+        let path_rarities =
+            env::var("AFTERLIFE_PATH_RARITIES").expect("Expected AFTERLIFE_PATH_RARITIES to be set");
+        // Fetch new data because either cache is empty or we're forcing an update.
+        let all_users_collections = match get_all_users_collections(client).await {
+            Ok(collections) => collections,
+            Err(_) => return Err(warp::reject::custom(CustomReject(
+                "Failed to fetch collections for all users".to_string(),
+            ))),
+        };
+
+        let mut leaderboard: LeaderboardType = HashMap::new();
+
+        let mut tasks = Vec::new();
+
+        for (user_address, user_collection) in all_users_collections {
+            let path_rarities = path_rarities.clone();
+            let user_address = user_address.clone();
+
+            let task = task::spawn(async move {
+                let username_or_addr = get_username_or_checksummed_address(&user_address).await
+                    .unwrap_or(Some(user_address.clone())).unwrap_or_default();
+
+                let mut total_rarity_score: f64 = 0.0;
+
+                // You could potentially parallelize this loop as well.
+                for (chain, contracts) in user_collection {
+                    for (contract_address, tokens) in contracts {
+                        let rarity_path = format!(
+                            "{}/{}_{}_rarity.json",
+                            path_rarities,
+                            chain,
+                            checksum(contract_address.as_str())
+                        );
+
+                        let rarity_data = read_file(Path::new(&rarity_path)).await;
+                        let rarity_map = build_rarity_map(rarity_data);
+
+                        for (token_id, balance) in tokens {
+                            if let Some((rarity_score, _)) = rarity_map.get(&token_id) {
+                                total_rarity_score += rarity_score * balance as f64;
+                            }
+                        }
+                    }
+                }
+
+                // Multiply by 1000 and round to nearest integer as per your original logic.
+                total_rarity_score = (total_rarity_score * 1000.0).round();
+
+                Ok::<_, Rejection>((username_or_addr, total_rarity_score))
+            });
+
+            tasks.push(task);
         }
+
+        let mut leaderboard: LeaderboardType = HashMap::new();
+        let results = try_join_all(tasks).await.map_err(|e| {
+            warp::reject::custom(CustomReject(format!("Task join error: {}", e)))
+        })?;
+        for task_result in results {
+            match task_result {
+                Ok((address, score)) => {
+                    leaderboard.insert(address, score);
+                },
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        *cache = Some(leaderboard.clone());
+        *cache = Some(leaderboard.clone());
+
     }
 
-    // Fetch new data because either cache is empty or we're forcing an update
-    match get_all_users_collections(client).await {
-        Ok(collections) => {
-            *cache = Some(collections.clone()); // Update cache with new data
-            Ok(collections)
-        }
-        Err(_) => Err(warp::reject::custom(CustomReject(
-            "Failed to fetch collections for all users".to_string(),
-        ))),
-    }
+    // The cache is either freshly populated or was already available.
+    cache.clone().ok_or_else(|| warp::reject::custom(CustomReject(
+        "Leaderboard cache is not available".to_string(),
+    )))
 }

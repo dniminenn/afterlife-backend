@@ -15,7 +15,7 @@ async fn main() {
     let update_client = shared_db_client.clone();
 
     // Define the period of the cache update task
-    let update_period = Duration::from_secs(30); // 30 seconds
+    let update_period = Duration::from_secs(60); // 30 seconds
     let mut interval = time::interval(update_period);
 
     tokio::spawn(async move {
