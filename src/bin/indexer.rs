@@ -89,7 +89,7 @@ async fn main() {
             total_contracts += chain.contracts.len();
         }
         //println!("Indexed {} contracts on {} chains in {:?}", total_contracts, config.chains.len(), elapsed);
-        if elapsed < Duration::from_secs(60) {
+        if elapsed < Duration::from_secs(1) {
             tokio::time::sleep(Duration::from_secs(1) - elapsed).await;
         }
     }
