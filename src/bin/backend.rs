@@ -8,8 +8,12 @@ use tokio::time::{self, Duration};
 async fn main() {
     println!("Starting Afterlife API, Insanity Edition");
     dotenv().ok();
-    let api_db_client = database::connect().await.expect("Failed to connect to API database");
-    let cache_db_client = database::connect().await.expect("Failed to connect to Cache database");
+    let api_db_client = database::connect()
+        .await
+        .expect("Failed to connect to API database");
+    let cache_db_client = database::connect()
+        .await
+        .expect("Failed to connect to Cache database");
 
     let shared_api_db_client = Arc::new(api_db_client);
     let shared_cache_db_client = Arc::new(cache_db_client);
@@ -21,7 +25,8 @@ async fn main() {
     tokio::spawn(async move {
         loop {
             interval.tick().await;
-            if let Err(e) = get_or_update_all_users_collections(&shared_cache_db_client, true).await {
+            if let Err(e) = get_or_update_all_users_collections(&shared_cache_db_client, true).await
+            {
                 eprintln!("Failed to update cache: {:?}", e);
             }
         }

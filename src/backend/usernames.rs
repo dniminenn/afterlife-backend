@@ -1,12 +1,14 @@
-use web3::types::Address;
 use crate::common::file_loader::load_users_data;
 use eth_checksum::checksum;
 use std::collections::{HashMap, HashSet};
+use web3::types::Address;
 
 pub async fn get_username_or_checksummed_address(
     wallet_address: &str,
 ) -> Result<Option<String>, String> {
-    let address = wallet_address.parse::<Address>().map_err(|_| "Invalid address".to_string())?;
+    let address = wallet_address
+        .parse::<Address>()
+        .map_err(|_| "Invalid address".to_string())?;
     let users_data = load_users_data().await;
 
     let mut address_to_username = HashMap::new();
@@ -29,11 +31,13 @@ pub async fn get_all_addresses_for_username(username: &str) -> HashSet<String> {
     let mut found_addresses = HashSet::new();
     // check if username is a valid address
     // Let's see first if there's a match for the username
-    if let Some(addresses) = users_data.get(username) { // we have a match!
+    if let Some(addresses) = users_data.get(username) {
+        // we have a match!
         for address in addresses {
             found_addresses.insert(address.clone());
         }
-    } else { // we don't have a match, but maybe the username is a valid address
+    } else {
+        // we don't have a match, but maybe the username is a valid address
         let isvalid = username.parse::<Address>().is_ok();
         if isvalid {
             // we have a valid address, maybe it's in the users_data, let's check

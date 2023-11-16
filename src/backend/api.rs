@@ -1,10 +1,15 @@
 use crate::backend;
-use crate::backend::queries::{get_all_users_collections, get_user_full_collection, get_contract_name_from_chain_and_address};
-use crate::backend::usernames::{get_all_addresses_for_username, get_username_or_checksummed_address};
+use crate::backend::queries::{
+    get_all_users_collections, get_contract_name_from_chain_and_address, get_user_full_collection,
+};
+use crate::backend::usernames::{
+    get_all_addresses_for_username, get_username_or_checksummed_address,
+};
 use crate::common;
 use backend::queries;
-use common::file_loader::{read_file};
+use common::file_loader::read_file;
 use eth_checksum::checksum;
+use futures::future::try_join_all;
 use once_cell::sync::Lazy;
 use serde_json::{json, Map, Number, Value};
 use std::collections::HashMap;
@@ -12,7 +17,6 @@ use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
 use std::{env, fs};
-use futures::future::try_join_all;
 use tokio::sync::Mutex;
 use tokio::task;
 use tokio_postgres::Client;
@@ -31,10 +35,16 @@ struct ErrorResponse {
 
 type CollectionsType = HashMap<String, HashMap<String, HashMap<String, HashMap<u64, i64>>>>;
 type LeaderboardType = HashMap<String, f64>;
-static ALL_USERS_LEADERBOARD_CACHE: Lazy<Mutex<Option<LeaderboardType>>> = Lazy::new(|| Mutex::new(None));
+static ALL_USERS_LEADERBOARD_CACHE: Lazy<Mutex<Option<LeaderboardType>>> =
+    Lazy::new(|| Mutex::new(None));
 
 // define const of excluded users or addresses for the leaderboard
-const EXCLUDED_USERS: [&str; 4] = ["Danetron3030", "AfterlifeTreasury", "0x3cc35873a61D925Ac46984f8C4F85d8fa6A892eF", "AfterlifeCoinBank"];
+const EXCLUDED_USERS: [&str; 4] = [
+    "Danetron3030",
+    "AfterlifeTreasury",
+    "0x3cc35873a61D925Ac46984f8C4F85d8fa6A892eF",
+    "AfterlifeCoinBank",
+];
 const DEAD_ADDRESS: &str = "0x000000000000000000000000000000000000dEaD";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
@@ -79,7 +89,10 @@ pub async fn run_server(client: Arc<Client>) {
             .and(with_db(client.clone()))
             .and_then(handle_get_all_afterlife_collections))
         .with(cors)
-        .with(warp::reply::with::header("Cache-Control", "public, max-age=60"));
+        .with(warp::reply::with::header(
+            "Cache-Control",
+            "public, max-age=60",
+        ));
 
     warp::serve(routes.recover(handle_custom_rejection))
         .run(([127, 0, 0, 1], 3030))
@@ -329,26 +342,51 @@ async fn handle_get_user_details(
     let mut all_nfts: HashMap<String, HashMap<String, Vec<_>>> = HashMap::new();
     let mut top_nfts = Vec::new();
 
-    let path_rarities = env::var("AFTERLIFE_PATH_RARITIES")
-        .map_err(|_| warp::reject::custom(CustomReject("Environment variable AFTERLIFE_PATH_RARITIES not set".to_string())))?;
+    let path_rarities = env::var("AFTERLIFE_PATH_RARITIES").map_err(|_| {
+        warp::reject::custom(CustomReject(
+            "Environment variable AFTERLIFE_PATH_RARITIES not set".to_string(),
+        ))
+    })?;
     let path_metadata = env::var("AFTERLIFE_PATH_METADATA").unwrap();
 
     for user_address in &user_addresses {
-        let user_collection = get_user_full_collection(&*client, user_address).await
-            .map_err(|_| warp::reject::custom(CustomReject("Failed to fetch user's full collection".to_string())))?;
+        let user_collection = get_user_full_collection(&*client, user_address)
+            .await
+            .map_err(|_| {
+                warp::reject::custom(CustomReject(
+                    "Failed to fetch user's full collection".to_string(),
+                ))
+            })?;
 
         for (chain, contracts) in user_collection {
             for (contract_address, tokens) in contracts {
-                let contract_name = get_contract_name_from_chain_and_address(&*client, &chain, &contract_address).await
-                    .map_err(|_| warp::reject::custom(CustomReject("Failed to fetch contract name".to_string())))?;
-                let rarity_path = format!("{}/{}_{}_rarity.json", path_rarities, chain, checksum(contract_address.as_str()));
+                let contract_name =
+                    get_contract_name_from_chain_and_address(&*client, &chain, &contract_address)
+                        .await
+                        .map_err(|_| {
+                            warp::reject::custom(CustomReject(
+                                "Failed to fetch contract name".to_string(),
+                            ))
+                        })?;
+                let rarity_path = format!(
+                    "{}/{}_{}_rarity.json",
+                    path_rarities,
+                    chain,
+                    checksum(contract_address.as_str())
+                );
                 let rarity_data = read_file(Path::new(&rarity_path)).await;
                 let rarity_map = build_rarity_map(rarity_data);
                 let collection_name = format!("{}_{}", chain, contract_name);
 
                 for (token_id, balance) in tokens {
                     if let Some((rarity_score, _)) = rarity_map.get(&token_id) {
-                        let metadata_path = format!("{}/{}/{}/{}.json", path_metadata, chain, checksum(contract_address.as_str()), token_id);
+                        let metadata_path = format!(
+                            "{}/{}/{}/{}.json",
+                            path_metadata,
+                            chain,
+                            checksum(contract_address.as_str()),
+                            token_id
+                        );
                         let metadata = read_file(Path::new(&metadata_path)).await;
                         let token_details = build_token_details(token_id, metadata, &rarity_map);
                         let mut token_name = "".to_string();
@@ -357,10 +395,19 @@ async fn handle_get_user_details(
                         }
                         let score = rarity_score * balance as f64;
                         total_rarity_score += score;
-                        *collection_scores.entry(collection_name.clone()).or_insert(0.0) += score;
-                        top_nfts.push((rarity_score.clone(), token_id, contract_address.clone(), chain.clone(), token_name.clone()));
+                        *collection_scores
+                            .entry(collection_name.clone())
+                            .or_insert(0.0) += score;
+                        top_nfts.push((
+                            rarity_score.clone(),
+                            token_id,
+                            contract_address.clone(),
+                            chain.clone(),
+                            token_name.clone(),
+                        ));
                         let chain_map = all_nfts.entry(chain.clone()).or_default();
-                        let contract_tokens = chain_map.entry(contract_address.clone()).or_default();
+                        let contract_tokens =
+                            chain_map.entry(contract_address.clone()).or_default();
 
                         contract_tokens.push(json!({
                         "rarity_score": (rarity_score * 1000.0).round(),
@@ -382,7 +429,8 @@ async fn handle_get_user_details(
     // Process other data as before
     total_rarity_score = (total_rarity_score * 1000.0).round();
     let addresses: Vec<String> = user_addresses.into_iter().collect();
-    let mut collections: Vec<_> = collection_scores.into_iter()
+    let mut collections: Vec<_> = collection_scores
+        .into_iter()
         .map(|(k, v)| (k, (v * 1000.0).round()))
         .collect();
     collections.sort_by(|a, b| a.0.cmp(&b.0));
@@ -431,13 +479,15 @@ pub async fn get_or_update_all_users_collections(
     let mut cache = ALL_USERS_LEADERBOARD_CACHE.lock().await;
 
     if cache.is_none() || force_update {
-        let path_rarities =
-            env::var("AFTERLIFE_PATH_RARITIES").expect("Expected AFTERLIFE_PATH_RARITIES to be set");
+        let path_rarities = env::var("AFTERLIFE_PATH_RARITIES")
+            .expect("Expected AFTERLIFE_PATH_RARITIES to be set");
         let all_users_collections = match get_all_users_collections(client).await {
             Ok(collections) => collections,
-            Err(_) => return Err(warp::reject::custom(CustomReject(
-                "Failed to fetch collections for all users".to_string(),
-            ))),
+            Err(_) => {
+                return Err(warp::reject::custom(CustomReject(
+                    "Failed to fetch collections for all users".to_string(),
+                )))
+            }
         };
 
         let mut tasks = Vec::new();
@@ -447,8 +497,10 @@ pub async fn get_or_update_all_users_collections(
             let user_address = user_address.clone();
 
             let task = task::spawn(async move {
-                let username_or_addr = get_username_or_checksummed_address(&user_address).await
-                    .unwrap_or(Some(user_address.clone())).unwrap_or_default();
+                let username_or_addr = get_username_or_checksummed_address(&user_address)
+                    .await
+                    .unwrap_or(Some(user_address.clone()))
+                    .unwrap_or_default();
 
                 if EXCLUDED_USERS.contains(&username_or_addr.as_str()) {
                     return Ok::<_, Rejection>((username_or_addr, 0.0));
@@ -485,9 +537,9 @@ pub async fn get_or_update_all_users_collections(
         }
 
         let mut leaderboard: LeaderboardType = HashMap::new();
-        let results = try_join_all(tasks).await.map_err(|e| {
-            warp::reject::custom(CustomReject(format!("Task join error: {}", e)))
-        })?;
+        let results = try_join_all(tasks)
+            .await
+            .map_err(|e| warp::reject::custom(CustomReject(format!("Task join error: {}", e))))?;
 
         for task_result in results {
             match task_result {
@@ -496,35 +548,43 @@ pub async fn get_or_update_all_users_collections(
                         .entry(username_or_addr)
                         .and_modify(|e| *e += score) // Add to the existing score.
                         .or_insert(score); // Insert if it does not exist.
-                },
+                }
                 Err(e) => {
                     return Err(e);
                 }
             }
         }
 
-        let filtered_leaderboard = leaderboard.into_iter()
+        let filtered_leaderboard = leaderboard
+            .into_iter()
             .filter(|(username_or_addr, score)| {
-                *score > 0.0 &&
-                    !EXCLUDED_USERS.iter().any(|&excluded| excluded.eq_ignore_ascii_case(username_or_addr)) &&
-                    !username_or_addr.eq_ignore_ascii_case(ZERO_ADDRESS) &&
-                    !username_or_addr.eq_ignore_ascii_case(DEAD_ADDRESS)
+                *score > 0.0
+                    && !EXCLUDED_USERS
+                        .iter()
+                        .any(|&excluded| excluded.eq_ignore_ascii_case(username_or_addr))
+                    && !username_or_addr.eq_ignore_ascii_case(ZERO_ADDRESS)
+                    && !username_or_addr.eq_ignore_ascii_case(DEAD_ADDRESS)
             })
             .collect::<LeaderboardType>();
 
         *cache = Some(filtered_leaderboard);
     }
 
-    cache.clone().ok_or_else(|| warp::reject::custom(CustomReject(
-        "Leaderboard cache is not available".to_string(),
-    )))
+    cache.clone().ok_or_else(|| {
+        warp::reject::custom(CustomReject(
+            "Leaderboard cache is not available".to_string(),
+        ))
+    })
 }
 
 pub async fn handle_get_all_afterlife_collections(
     client: Arc<Client>,
 ) -> Result<impl warp::Reply, Rejection> {
-    let all_users_collections = get_all_users_collections(&client).await
-        .map_err(|_| warp::reject::custom(CustomReject("Failed to fetch collections for all users".to_string())))?;
+    let all_users_collections = get_all_users_collections(&client).await.map_err(|_| {
+        warp::reject::custom(CustomReject(
+            "Failed to fetch collections for all users".to_string(),
+        ))
+    })?;
 
     Ok(warp::reply::json(&all_users_collections).into_response())
 }

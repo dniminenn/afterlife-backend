@@ -1,6 +1,7 @@
 use crate::indexer::indexer_config::{Chain, Contract};
 use crate::indexer::log_decode::{decode_erc1155_transfer_batch, decode_erc1155_transfer_single};
 use crate::indexer::queries::Event;
+use bigdecimal::num_traits::AsPrimitive;
 use futures::stream::{FuturesUnordered, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::convert::From;
@@ -8,7 +9,6 @@ use std::convert::TryInto;
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use bigdecimal::num_traits::AsPrimitive;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
 use web3::error::{Error as Web3Error, TransportError};
@@ -103,9 +103,7 @@ impl<'a> EventFetcher<'a> {
 
     pub async fn execute(&self) -> Result<(Vec<Event>, (usize, usize)), EventFetcherError> {
         let mut events = Vec::new();
-        let current_block = self
-            .retry_fetch_current_block()
-            .await?;
+        let current_block = self.retry_fetch_current_block().await?;
 
         let look_back_start_block = if current_block <= self.last_processed_block + 2000 {
             // If we are within one chunk of the last processed block, look back a full chunk
@@ -114,7 +112,6 @@ impl<'a> EventFetcher<'a> {
             // If we are beyond one chunk, start at the last processed block
             self.last_processed_block
         };
-
 
         let start_block = std::cmp::max(
             look_back_start_block,
@@ -356,7 +353,10 @@ impl<'a> EventFetcher<'a> {
                     }
                     eprintln!(
                         "Error fetching current block: {}. Retrying in {:?}... (Attempt {} of {})",
-                        e, delay, attempts + 1, MAX_RETRY_COUNT
+                        e,
+                        delay,
+                        attempts + 1,
+                        MAX_RETRY_COUNT
                     );
                     sleep(delay).await;
                     delay *= 2;

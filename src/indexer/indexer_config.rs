@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::{Read, BufReader};
 use std::env;
+use std::fs::File;
+use std::io::{BufReader, Read};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Chain {
@@ -27,11 +27,14 @@ pub struct IndexerConfig {
 
 impl IndexerConfig {
     pub fn from_env() -> Result<Self, serde_yaml::Error> {
-        let path = env::var("AFTERLIFE_PATH_IDXCFG").expect("Environment variable AFTERLIFE_PATH_IDXCFG not set");
+        let path = env::var("AFTERLIFE_PATH_IDXCFG")
+            .expect("Environment variable AFTERLIFE_PATH_IDXCFG not set");
         let file = File::open(&path).expect("Failed to open file");
         let mut buf_reader = BufReader::new(file);
         let mut content = String::new();
-        buf_reader.read_to_string(&mut content).expect("Failed to read file");
+        buf_reader
+            .read_to_string(&mut content)
+            .expect("Failed to read file");
         serde_yaml::from_str(&content)
     }
 

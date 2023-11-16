@@ -1,7 +1,7 @@
 use crate::indexer;
 use indexer::indexer_config::{Chain, Contract};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::result::Result;
 use tokio_postgres::{Client, Error, GenericClient};
 extern crate primitive_types;
@@ -119,8 +119,8 @@ pub async fn contract_and_chain_to_contractid<C>(
     chain: &Chain,
     client_or_transaction: &C,
 ) -> Result<i32, Error>
-    where
-        C: GenericClient
+where
+    C: GenericClient,
 {
     let chain_id: i32 = match client_or_transaction
         .query_one(
@@ -130,15 +130,13 @@ pub async fn contract_and_chain_to_contractid<C>(
         .await
     {
         Ok(row) => row.get(0),
-        Err(_) => {
-            client_or_transaction
-                .query_one(
-                    "INSERT INTO chains (name, rpc_url, chunk_size) VALUES ($1, $2, $3) RETURNING id",
-                    &[&chain.name, &chain.rpc_url, &(chain.chunk_size as i32)],
-                )
-                .await?
-                .get(0)
-        }
+        Err(_) => client_or_transaction
+            .query_one(
+                "INSERT INTO chains (name, rpc_url, chunk_size) VALUES ($1, $2, $3) RETURNING id",
+                &[&chain.name, &chain.rpc_url, &(chain.chunk_size as i32)],
+            )
+            .await?
+            .get(0),
     };
 
     let contract_id: i32 = match client_or_transaction

@@ -11,16 +11,38 @@ fn token_to_u256(token: &Token) -> Option<U256> {
 }
 
 // Function to decode batch event using predefined ABI
-pub(crate) fn decode_erc1155_transfer_batch(log: &Log) -> Result<(Vec<U256>, Vec<U256>), ethabi::Error> {
+pub(crate) fn decode_erc1155_transfer_batch(
+    log: &Log,
+) -> Result<(Vec<U256>, Vec<U256>), ethabi::Error> {
     // Define the ERC1155 TransferBatch event signature
     let event = Event {
         name: "TransferBatch".into(),
         inputs: vec![
-            ethabi::EventParam { name: "operator".into(), kind: ethabi::ParamType::Address, indexed: true },
-            ethabi::EventParam { name: "from".into(), kind: ethabi::ParamType::Address, indexed: true },
-            ethabi::EventParam { name: "to".into(), kind: ethabi::ParamType::Address, indexed: true },
-            ethabi::EventParam { name: "ids".into(), kind: ethabi::ParamType::Array(Box::new(ethabi::ParamType::Uint(256))), indexed: false },
-            ethabi::EventParam { name: "values".into(), kind: ethabi::ParamType::Array(Box::new(ethabi::ParamType::Uint(256))), indexed: false },
+            ethabi::EventParam {
+                name: "operator".into(),
+                kind: ethabi::ParamType::Address,
+                indexed: true,
+            },
+            ethabi::EventParam {
+                name: "from".into(),
+                kind: ethabi::ParamType::Address,
+                indexed: true,
+            },
+            ethabi::EventParam {
+                name: "to".into(),
+                kind: ethabi::ParamType::Address,
+                indexed: true,
+            },
+            ethabi::EventParam {
+                name: "ids".into(),
+                kind: ethabi::ParamType::Array(Box::new(ethabi::ParamType::Uint(256))),
+                indexed: false,
+            },
+            ethabi::EventParam {
+                name: "values".into(),
+                kind: ethabi::ParamType::Array(Box::new(ethabi::ParamType::Uint(256))),
+                indexed: false,
+            },
         ],
         anonymous: false,
     };
@@ -48,7 +70,6 @@ pub(crate) fn decode_erc1155_transfer_batch(log: &Log) -> Result<(Vec<U256>, Vec
         return Err(ethabi::Error::InvalidData); // Handle error appropriately
     };
 
-
     Ok((ids, values))
 }
 
@@ -58,11 +79,31 @@ pub(crate) fn decode_erc1155_transfer_single(log: &Log) -> Result<(U256, U256), 
     let event = Event {
         name: "TransferSingle".into(),
         inputs: vec![
-            ethabi::EventParam { name: "operator".into(), kind: ethabi::ParamType::Address, indexed: true },
-            ethabi::EventParam { name: "from".into(), kind: ethabi::ParamType::Address, indexed: true },
-            ethabi::EventParam { name: "to".into(), kind: ethabi::ParamType::Address, indexed: true },
-            ethabi::EventParam { name: "id".into(), kind: ethabi::ParamType::Uint(256), indexed: false },
-            ethabi::EventParam { name: "value".into(), kind: ethabi::ParamType::Uint(256), indexed: false },
+            ethabi::EventParam {
+                name: "operator".into(),
+                kind: ethabi::ParamType::Address,
+                indexed: true,
+            },
+            ethabi::EventParam {
+                name: "from".into(),
+                kind: ethabi::ParamType::Address,
+                indexed: true,
+            },
+            ethabi::EventParam {
+                name: "to".into(),
+                kind: ethabi::ParamType::Address,
+                indexed: true,
+            },
+            ethabi::EventParam {
+                name: "id".into(),
+                kind: ethabi::ParamType::Uint(256),
+                indexed: false,
+            },
+            ethabi::EventParam {
+                name: "value".into(),
+                kind: ethabi::ParamType::Uint(256),
+                indexed: false,
+            },
         ],
         anonymous: false,
     };

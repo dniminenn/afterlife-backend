@@ -1,9 +1,12 @@
-use std::collections::HashMap;
 use afterlife_backend::common::database;
 use afterlife_backend::indexer::indexer_config::IndexerConfig;
-use afterlife_backend::indexer::queries::{get_earliest_last_processed_block, Event, nuke_and_process_events_for_chain, contract_and_chain_to_contractid};
+use afterlife_backend::indexer::queries::{
+    contract_and_chain_to_contractid, get_earliest_last_processed_block,
+    nuke_and_process_events_for_chain, Event,
+};
 use afterlife_backend::indexer::remote_calls::EventFetcher;
 use dotenv::dotenv;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio;
 
@@ -37,9 +40,10 @@ async fn main() {
         let mut blocks_for_chains = Vec::new();
 
         for chain in &config.chains {
-            let earliest_last_processed_block = get_earliest_last_processed_block(chain, &db_client)
-                .await
-                .expect("Failed to get earliest last processed block");
+            let earliest_last_processed_block =
+                get_earliest_last_processed_block(chain, &db_client)
+                    .await
+                    .expect("Failed to get earliest last processed block");
             blocks_for_chains.push((chain.clone(), earliest_last_processed_block));
         }
 
@@ -49,7 +53,10 @@ async fn main() {
         for (chain, block) in blocks_for_chains {
             let task = tokio::task::spawn(async move {
                 let event_fetcher = EventFetcher::new(&chain, block as usize);
-                let result = event_fetcher.execute().await.expect("Failed to fetch events");
+                let result = event_fetcher
+                    .execute()
+                    .await
+                    .expect("Failed to fetch events");
                 (chain.clone(), result.0, result.1)
             });
 
@@ -63,9 +70,10 @@ async fn main() {
             all_blocks_by_chain.insert(chain.name.clone(), (from_block as u64, to_block as u64));
 
             for event in events {
-                let contract_id = contract_and_chain_to_contractid(&event.contract, &chain, &db_client)
-                    .await
-                    .expect("Failed to get contract id");
+                let contract_id =
+                    contract_and_chain_to_contractid(&event.contract, &chain, &db_client)
+                        .await
+                        .expect("Failed to get contract id");
                 all_events_by_contract
                     .entry(contract_id)
                     .or_insert_with(Vec::new)
@@ -75,14 +83,23 @@ async fn main() {
 
         // Process all events
         for (chain_name, (from_block, to_block)) in all_blocks_by_chain.iter() {
-            let chain = config.chains.iter().find(|c| &c.name == chain_name).unwrap();
-            nuke_and_process_events_for_chain(chain, &all_events_by_contract, *from_block, *to_block, &mut db_client)
-                .await
-                .expect("Failed to nuke and process events");
+            let chain = config
+                .chains
+                .iter()
+                .find(|c| &c.name == chain_name)
+                .unwrap();
+            nuke_and_process_events_for_chain(
+                chain,
+                &all_events_by_contract,
+                *from_block,
+                *to_block,
+                &mut db_client,
+            )
+            .await
+            .expect("Failed to nuke and process events");
         }
 
         let elapsed = start.elapsed();
-
 
         let mut total_contracts = 0;
         for chain in &config.chains {
